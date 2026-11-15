@@ -6,7 +6,7 @@ Este guia documenta o padrão canônico **zero-boilerplate** para governar recur
 
 ## 1. Visão Geral da Arquitetura no Host
 
-Ao incluir `praxis-authz-starter` no classpath de um host com `praxis-metadata-starter`, a auto-configuração [`PraxisAuthzHostBridgeAutoConfiguration`](../../../../../java/org/praxisplatform/authz/autoconfigure/PraxisAuthzHostBridgeAutoConfiguration.java) ativa automaticamente:
+Ao incluir `praxis-authz-starter` no classpath de um host com `praxis-metadata-starter`, a auto-configuração [`PraxisAuthzHostBridgeAutoConfiguration`](../../../java/org/praxisplatform/authz/autoconfigure/PraxisAuthzHostBridgeAutoConfiguration.java) ativa automaticamente:
 
 1. **`MetadataDtoGovernanceIntrospector`:** Introspecta `@DomainLineage`, `@DomainGovernance` e `@Schema` nos DTOs (`ResponseDTO`, `CreateDTO`, `UpdateDTO`), herdando automaticamente a linhagem (`attributeId`), sensibilidade, elegibilidade de exportação e política de IA do `ResponseDTO` para propriedades mapeadas em `CreateDTO` e `UpdateDTO`, além de derivar os registros `FieldLineageCatalogEntry` para o Catálogo Semântico PAP (`Fase P10.13`).
 2. **`ThreadLocalAuthzCallerContextProvider` + `AuthzCallerContextFilter` + `ResourceTenantContextResolver`:** Propaga o contexto do chamador autenticado (`tenantId`, fatos `subject.*`/`env.*`, cabeçalhos HTTP para proteção anti-spoofing `CC10` e usos de campo `FILTER`/`SORT`/`GROUP`) por requisição HTTP e vincula o isolamento de tenant para `@CustomFields` (`JSONB`).
@@ -211,7 +211,7 @@ public class AfastamentoGovernedService extends AbstractAuthzGovernedResourceSer
 
 ## 4. Gate JUnit de Prontidão no Host (`AuthzHostReadinessReviewer`)
 
-Todo host que adota `praxis-authz-starter` deve incluir um teste JUnit executando [`AuthzHostReadinessReviewer`](../../../../../java/org/praxisplatform/authz/host/metadata/AuthzHostReadinessReviewer.java) para auditar estaticamente todos os serviços governados:
+Todo host que adota `praxis-authz-starter` deve incluir um teste JUnit executando [`AuthzHostReadinessReviewer`](../../../java/org/praxisplatform/authz/host/metadata/AuthzHostReadinessReviewer.java) para auditar estaticamente todos os serviços governados:
 
 ```java
 @SpringBootTest
@@ -256,7 +256,7 @@ class HostAuthzReadinessGateTest {
 
 ## 5. Simulação Declarativa de Matriz de Políticas em JUnit (`AuthzPolicySimulationHarness` — `Fase P10.16-C`)
 
-Use [`AuthzPolicySimulationHarness`](../../../../../java/org/praxisplatform/authz/host/metadata/AuthzPolicySimulationHarness.java) para validar a matriz de autorização de um recurso em memória:
+Use [`AuthzPolicySimulationHarness`](../../../java/org/praxisplatform/authz/host/metadata/AuthzPolicySimulationHarness.java) para validar a matriz de autorização de um recurso em memória:
 
 ```java
 AuthzPolicySimulationHarness.forResource(spec, bundle, AfastamentoResponseDTO.class)
