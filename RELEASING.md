@@ -1,35 +1,49 @@
-# Guia de Release (`praxis-authz-starter`)
+# Guia de Release — Praxis Authz Starter
 
-Este repositório segue a [Política de Releases e GitHub Actions](ACTIONS-RELEASE-POLICY.md) para publicar o starter oficial da **Praxis Authorization Decision Platform** somente após todos os módulos anteriores já estarem disponíveis no Maven Central.
+## Linha Pública
 
-## Pré-requisitos do Ambiente
+A linha pública ativa é `0.1.0-beta.*` sob a coordenada `io.github.codexrodrigues:praxis-authz-starter` sobre Spring Boot `3.5.15` (release atual publicada: `0.1.0-beta.1`).
 
-- **Java:** `[21,)` (compatível com Spring Boot `3.5.15`)
-- **Apache Maven:** `3.9.0` ou superior (`requireReleaseDeps` ativo)
-- **GPG & Central Portal:** segredos `CENTRAL_TOKEN_USER`, `CENTRAL_TOKEN_PASS`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `GPG_KEY_ID` e `RELEASE_PAT` configurados no repositório para execução em CI
+Este repositório segue a [Política de Releases e GitHub Actions](ACTIONS-RELEASE-POLICY.md).
 
-## Ordem de Publicação Multi-Repositório
+## Ordem Sequencial de Publicação Multi-Repositório (4 Etapas)
 
-`praxis-authz-starter` é o **Nível 2 (camada final de publicação)** da stack:
+`praxis-authz-starter` é a **etapa final (Etapa 4)** da cadeia de publicação e verifica a presença de todos os três módulos anteriores no `repo1.maven.org` antes de criar a tag:
 
-1. `praxis-authz-contracts` *(Nível 0)*
-2. `praxis-authz-enforcement-core` e `praxis-authz-opa` *(Nível 1)*
-3. **`praxis-authz-starter`** ← *(publicar por último, após todos os anteriores visíveis no Maven Central)*
+1. `codexrodrigues/praxis-authz-contracts`
+2. `codexrodrigues/praxis-authz-enforcement-core`
+3. `codexrodrigues/praxis-authz-opa`
+4. **`codexrodrigues/praxis-authz-starter`** *(este repositório — publicar somente após 1, 2 e 3 retornarem `HTTP 200` no Maven Central)*
 
-## Verificação Local Pré-Release
+Todos os quatro módulos de uma onda coordenada devem publicar exatamente a mesma string SemVer. O `maven-enforcer-plugin` impõe `requireReleaseDeps`, impedindo dependências `-SNAPSHOT`.
 
-Antes de acionar a release via workflow:
+## Segredos Obrigatórios no Repositório
 
-```powershell
-mvn -B clean verify
-```
+- `CENTRAL_TOKEN_USER`
+- `CENTRAL_TOKEN_PASS`
+- `GPG_PRIVATE_KEY` (bloco ASCII-armored com a linha em branco obrigatória pela RFC 4880 imediatamente após `-----BEGIN PGP PRIVATE KEY BLOCK-----`, ou exportação binária codificada em base64)
+- `GPG_PASSPHRASE`
+- `GPG_KEY_ID` (opcional)
+- `RELEASE_PAT`, com permissão `contents: write` para enviar commits e tags para `main`
 
-Garanta que:
-- Toda a matriz `P01..P64`, testes de auto-configuração Spring Boot e integrações com `AbstractBaseResourceService` passaram;
-- Não existam referências `-SNAPSHOT` no `pom.xml`;
-- As tabelas de propriedades `praxis.authz.*` e histórico em `CHANGELOG.md` reflitam a versão alvo.
+`RELEASE_PAT` é obrigatório porque tags enviadas via `GITHUB_TOKEN` não disparam o workflow separado com gatilho `push: tags: v*`.
 
-## Fluxo Oficial no GitHub Actions
+## Fluxo Oficial de Release
 
-- `ci.yml` executa **apenas** via `workflow_dispatch`;
-- `release.yml` executa via `workflow_dispatch` ou tag `v*` aprovada, publicando via `central-publishing-maven-plugin`.
+1. Confirme que `contracts`, `enforcement-core` e `opa` já estão acessíveis na versão alvo em `repo1.maven.org`, que o working tree está limpo e toda a suíte local (`P01..P64`, integração HTTP/reentrante e `AbstractBaseResourceService`) passa com JDK 21 (`[21,)`) e Maven `3.9.0+`:
+
+   ```powershell
+   mvn -B clean verify
+   ```
+
+2. No GitHub Actions, execute **Release Praxis Authz Starter** (`workflow_dispatch`) em `main` com `create_tag=true` informando `version` ou `bump`/`preid`.
+3. O job `create_tag` verifica os `.pom`s upstream em `repo1.maven.org`, grava a versão no `pom.xml`, cria a tag anotada `v<semver>` e envia `HEAD:main` + tag atomicamente.
+4. O job `publish` valida a tag, importa a chave GPG, executa a matriz de conformidade completa, gera o POM achatado (`flatten-maven-plugin`, modo `oss`), assina `.pom`/`.jar`/`-sources.jar`/`-javadoc.jar`, publica via `central-publishing-maven-plugin` e aguarda `HTTP 200` em `repo1.maven.org`.
+5. Antes de rodar `mvn install` localmente para alterações inéditas não publicadas, avance `<version>` para o próximo `-SNAPSHOT` para não sobrescrever o artefato oficial em `~/.m2`.
+6. Valide as coordenadas publicadas usando um repositório local temporário isolado contra `repo1.maven.org`:
+
+   ```powershell
+   mvn -B -Dmaven.repo.local=<temp-dir> dependency:tree
+   ```
+
+Nunca crie tags manualmente para disparar CI nem execute `mvn deploy` localmente.

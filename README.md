@@ -9,6 +9,7 @@ Auto-configuração Spring Boot 3.5, serviços base governados integrados ao [`p
 
 **Links Rápidos:**
 [Maven Central](https://central.sonatype.com/artifact/io.github.codexrodrigues/praxis-authz-starter) ·
+[Guia de Adoção no Host](src/main/resources/META-INF/praxis/AUTHZ-HOST-ADOPTION-GUIDE.md) ·
 [Changelog](CHANGELOG.md) ·
 [Guia de Release](RELEASING.md) ·
 [Como Contribuir](CONTRIBUTING.md) ·
@@ -90,7 +91,7 @@ Com o **`praxis-authz-starter` e a introspecção Zero-Blueprint (`PLAT-EVO-10`)
 
 1. **De ~350+ Linhas Manuais para ~10 Linhas Declarativas por Recurso:** Em vez de escrever manualmente listas intermináveis de mapeamentos por campo, `AuthzResourceGovernanceSpec.fromAnnotatedResource("hr-service", "tenantId", Entity.class, ResponseDTO.class, FilterDTO.class, Controller.class)` extrai automaticamente todos os pontos de decisão, contratos de fatos, projeções consultáveis e bindings JPA das anotações que o recurso já possui — substituindo centenas de linhas repetitivas (equivalentes a vários milhares de tokens de geração e revisão por recurso) por ~10 linhas.
 2. **Economia de Janela de Contexto em Prompts e Agentes Autônomos:** Como toda a governança converge em uma classe de serviço curta (`extends AbstractAuthzGovernedResourceService`) e um `AuthzHostPolicyBootstrapBuilder`, um agente de IA entende ou cria um novo recurso completamente blindado lendo apenas a própria especificação semântica do recurso, sem inflar o prompt com arquivos paralelos de segurança.
-3. **Menos Ciclos de Erro-Correção por LLM (`AUTHZ-HOST-001..014`):** O `AuthzHostReadinessReviewer` aponta em segundos, ainda nos testes unitários locais, se faltou algum binding de campo, contexto organizacional ou proteção — eliminando rodadas caras de prompts corretivos após falhas tardias em ambiente de homologação.
+3. **Menos Ciclos de Erro-Correção por LLM (`AUTHZ-HOST-001..014` e `AuthzPolicySimulationHarness`):** O `AuthzHostReadinessReviewer` aponta em segundos, ainda nos testes unitários locais, se faltou algum binding de campo, contexto organizacional ou proteção, enquanto o `AuthzPolicySimulationHarness` permite simular matrizes tabulares completas (`Caller × Operação × Entidade`) em memória no JUnit sem subir banco ou servidor HTTP — eliminando rodadas caras de prompts corretivos após falhas tardias em homologação.
 
 ---
 
@@ -197,7 +198,7 @@ AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
 
 new AuthzHostReadinessReviewer()
         .reviewAll(List.of(), List.of(employeeLeaveService))
-        .assertReady(); // valida AUTHZ-HOST-001 até AUTHZ-HOST-014
+        .assertReady(); // falha em Severity.ERROR (ou use .assertZeroIssues() para bloquear também WARNINGs em AUTHZ-HOST-001..014)
 ```
 
 ### 4. Configure `application.yml`
@@ -224,7 +225,7 @@ praxis:
 | Pacote (`org.praxisplatform.authz...`) | Tipos Principais | Papel na Arquitetura |
 | :--- | :--- | :--- |
 | `...autoconfigure` | `PraxisAuthzAutoConfiguration`, `PraxisAuthzHostBridgeAutoConfiguration`, `PraxisAuthzProperties`, `PraxisAuthzBootstrapException` | Auto-configura o pipeline PEP de 15 etapas, verificação de compatibilidade no startup, `PraxisAuthzHostBridgeAutoConfiguration` *fail-closed* (ordenado antes de `OpenApiUiSchemaAutoConfiguration`) e adaptadores HTTP |
-| `...host.metadata` | `AuthzResourceGovernanceSpec`, `AbstractAuthzGovernedResourceService`, `AbstractAuthzGovernedReadOnlyResourceService`, `AuthzHostPolicyBootstrapBuilder`, `AuthzHostReadinessReviewer`, `MetadataDtoGovernanceIntrospector`, `AuthzMaskingResourceMapperDecorator`, `AuthzResourceOperationAvailabilityProvider`, `JpaCriteriaDataScopeTranslator`, `AuthzGovernedStatsQueryExecutor`, `AuthzGovernedOptionSourceProvider`, `AuthzGovernedReactiveDeterminationProvider`, `AuthzGovernedBulkDomainResourceAdapter`, `AuthzGovernedCollectionExportExecutor`, `PraxisAuthzExceptionHandler` | Integração completa com `praxis-metadata-starter`: introspecção de governança de DTO, pushdown SQL via JPA Criteria, mapeamento mascarado, disponibilidade em HATEOAS/surfaces/ações, estatísticas, *option sources*, determinações reativas, atualização em lote e auditoria de prontidão `AUTHZ-HOST-001..014` |
+| `...host.metadata` | `AuthzResourceGovernanceSpec`, `AbstractAuthzGovernedResourceService`, `AbstractAuthzGovernedReadOnlyResourceService`, `AuthzHostPolicyBootstrapBuilder`, `AuthzHostReadinessReviewer`, `AuthzPolicySimulationHarness`, `MetadataDtoGovernanceIntrospector`, `AuthzMaskingResourceMapperDecorator`, `AuthzResourceOperationAvailabilityProvider`, `JpaCriteriaDataScopeTranslator`, `AuthzGovernedStatsQueryExecutor`, `AuthzGovernedOptionSourceProvider`, `AuthzGovernedReactiveDeterminationProvider`, `AuthzGovernedBulkDomainResourceAdapter`, `AuthzGovernedCollectionExportExecutor`, `PraxisAuthzExceptionHandler` | Integração completa com `praxis-metadata-starter`: introspecção de governança de DTO, pushdown SQL via JPA Criteria, mapeamento mascarado, disponibilidade em HATEOAS/surfaces/ações, estatísticas, *option sources*, determinações reativas, atualização em lote, simulação tabular de políticas em memória (`AuthzPolicySimulationHarness`) e auditoria de prontidão `AUTHZ-HOST-001..014` |
 | `...compatibility` | `HostPolicyCompatibilityStartupVerifier`, `HostRuntimePolicyCoordinates`, `PraxisAuthzReadinessHealthIndicator`, `PraxisAuthzReadinessStatus` | Executa o handshake de compatibilidade no boot (`P20`, `P39`, `P48`, `P59`) e publica detalhes de saúde no Spring Boot Actuator (`runtimeRevision`, `policySetDigest`, `verifiedDecisionPointCount`) |
 | `...catalog` | `SemanticDecisionPointCatalogService`, `MethodBindingAdmissionRecord`, `FieldLineageCatalogEntry`, `AdmittedInvocationChannel`, `PapCatalogQueryRequest`, `PapCatalogViewResponse` | Publica catálogos estruturais de pontos de decisão e linhagem de campos para governança no PAP sem executar métodos de negócio nem ler dados ativos de tenants |
 | `...channel` | `GovernedChannelInvocationExecutor` | Bloqueia contorno por auto-invocação sem proxy (`P41`), preserva o `EvaluationContextSnapshot` externo (`P29`), reavalia pontos internos (`P42`) e mascara acertos de cache (`P26`) |
@@ -293,6 +294,7 @@ mvn -B clean verify
 ```
 
 Documentação relacionada neste repositório:
+- [Guia de Adoção no Host (`AUTHZ-HOST-ADOPTION-GUIDE.md`)](src/main/resources/META-INF/praxis/AUTHZ-HOST-ADOPTION-GUIDE.md) — passo a passo detalhado de adoção zero-boilerplate, hooks, `AUTHZ-HOST-001..014` e `AuthzPolicySimulationHarness`
 - [CHANGELOG.md](CHANGELOG.md) — histórico de versões e artefatos publicados
 - [RELEASING.md](RELEASING.md) — ordem de release multi-repositório e fluxo Maven Central
 - [ACTIONS-RELEASE-POLICY.md](ACTIONS-RELEASE-POLICY.md) — política estrita de uso do GitHub Actions e gates de release
