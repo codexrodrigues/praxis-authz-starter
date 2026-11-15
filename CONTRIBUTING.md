@@ -1,31 +1,19 @@
-# Contributing to Praxis Authz Starter
+# Como Contribuir com `praxis-authz-starter`
 
-Thank you for contributing to `praxis-authz-starter`.
+Contribuições para `praxis-authz-starter` devem preservar o comportamento *fail-closed* de inicialização e runtime, a compatibilidade com Spring Boot `3.5.x` e a integração limpa com [`praxis-metadata-starter`](https://github.com/codexrodrigues/praxis-metadata-starter) e [`praxis-config-starter`](https://github.com/codexrodrigues/praxis-config-starter).
 
-## Development Baseline
+## Diretrizes de Contribuição
 
-- **Java:** 21+ (`[21,)` enforced by `maven-enforcer-plugin`, compiled with `--release 21`)
-- **Maven:** 3.9.0 or newer
-- **Spring Boot Parent:** `3.5.15`
+1. **Invariantes Fail-Closed no Startup e em Runtime:** Nunca degrade erros de provedor ausente (`AUTHZ_BOOTSTRAP_MISSING_PROVIDER`), ambiguidade de beans (`AUTHZ_BOOTSTRAP_AMBIGUOUS_PROVIDERS`) ou incompatibilidade de digests para avisos silenciosos quando `fail-closed-on-bootstrap-error=true`.
+2. **Não Duplique Lógica de Negócio do `enforcement-core` ou `opa`:** Alterações no pipeline de 15 etapas pertencem a [`praxis-authz-enforcement-core`](https://github.com/codexrodrigues/praxis-authz-enforcement-core); compilação Rego v1 e guarda `SEARCH` pertencem a [`praxis-authz-opa`](https://github.com/codexrodrigues/praxis-authz-opa).
+3. **Preserve Introspecção Zero-Blueprint (`PLAT-EVO-10`):** Novos pontos de extensão de recursos no `praxis-metadata-starter` devem ser descobertos automaticamente por `AuthzResourceGovernanceSpec` e auditados em `AuthzHostReadinessReviewer` (`AUTHZ-HOST-*`).
+4. **Cobertura de Conformidade (`P01..P64`):** Toda nova ponte Spring, exceção HTTP em `PraxisAuthzExceptionHandler` ou guarda JDBC/outbox exige testes automatizados verificando tanto caminhos permitidos quanto falhas fechadas.
+5. **Documentação em PT-BR:** Escreva guias, exemplos e atualizações de README em Português do Brasil claro, preservando os identificadores técnicos exatos do código e das propriedades `praxis.authz.*`.
 
-Run the full local test and verification suite before submitting changes:
+## Verificação Local
 
 ```powershell
 mvn -B clean verify
 ```
 
-## Module Boundary & Host Bridge Rules
-
-`praxis-authz-starter` is the Spring Boot integration layer of the **Praxis Authorization Decision Platform**:
-
-- Keep pure `CC01–CC12` contracts, digest calculators, and Kleene 3VL evaluators in `praxis-authz-contracts`;
-- Keep framework-neutral PEP pipeline execution, header anti-spoofing, JPA adapters, and DTO masking in `praxis-authz-enforcement-core`;
-- Keep Rego v1 compilation, bundle assembly, and OPA revision guarding in `praxis-authz-opa`;
-- Keep optional integrations (`praxis-metadata-starter`, `praxis-config-starter`, Actuator, Data JPA, JDBC, Spring Web) resilient so conditional auto-configuration behaves cleanly even when optional starters are absent;
-- Keep business rules (`decisionKind = BUSINESS`) in `praxis-rules-engine` and never bypass `AbstractAuthzGovernedResourceService` hooks or `AUTHZ-HOST-001..014` readiness checks.
-
-## Contract & Release Discipline
-
-- Changes to `PraxisAuthzProperties`, `AbstractAuthzGovernedResourceService`, `AuthzResourceGovernanceSpec`, `PraxisAuthzExceptionHandler`, or `AuthzHostReadinessReviewer` must include corresponding tests and updates to `README.md` / `CHANGELOG.md`;
-- Never commit secrets, GPG material, production HMAC keys, database credentials, or personal tokens;
-- Do not create release tags manually or run local `mvn deploy`; follow [RELEASING.md](RELEASING.md).
+Consulte também [AGENTS.md](AGENTS.md) e [ACTIONS-RELEASE-POLICY.md](ACTIONS-RELEASE-POLICY.md).

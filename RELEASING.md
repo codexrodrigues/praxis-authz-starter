@@ -1,43 +1,35 @@
-# Releasing — Praxis Authz Starter
+# Guia de Release (`praxis-authz-starter`)
 
-## Public line
+Este repositório segue a [Política de Releases e GitHub Actions](ACTIONS-RELEASE-POLICY.md) para publicar o starter oficial da **Praxis Authorization Decision Platform** somente após todos os módulos anteriores já estarem disponíveis no Maven Central.
 
-The active public line is `0.1.0-beta.*` under coordinate `io.github.codexrodrigues:praxis-authz-starter` (current published release: `0.1.0-beta.1`). Compatible corrections remain on this line while downstream hosts (`praxis-ergon-showcase`, Quickstart, and Ergon modules) validate auto-configuration, conformance matrix gates, and OPA HTTP integration. A stable `1.0.0` or new major requires a governed compatibility and migration plan.
+## Pré-requisitos do Ambiente
 
-## Multi-repository release order
+- **Java:** `[21,)` (compatível com Spring Boot `3.5.15`)
+- **Apache Maven:** `3.9.0` ou superior (`requireReleaseDeps` ativo)
+- **GPG & Central Portal:** segredos `CENTRAL_TOKEN_USER`, `CENTRAL_TOKEN_PASS`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `GPG_KEY_ID` e `RELEASE_PAT` configurados no repositório para execução em CI
 
-This module sets `<praxis-authz.version>${project.version}</praxis-authz.version>` in `pom.xml`, and `release.yml` requires the matching `.pom` files for all three upstream modules to return `HTTP 200` on `repo1.maven.org` before tagging:
+## Ordem de Publicação Multi-Repositório
 
-1. `codexrodrigues/praxis-authz-contracts`
-2. `codexrodrigues/praxis-authz-enforcement-core`
-3. `codexrodrigues/praxis-authz-opa`
-4. `codexrodrigues/praxis-authz-starter` (this repository; published last)
+`praxis-authz-starter` é o **Nível 2 (camada final de publicação)** da stack:
 
-## Required repository secrets
+1. `praxis-authz-contracts` *(Nível 0)*
+2. `praxis-authz-enforcement-core` e `praxis-authz-opa` *(Nível 1)*
+3. **`praxis-authz-starter`** ← *(publicar por último, após todos os anteriores visíveis no Maven Central)*
 
-- `CENTRAL_TOKEN_USER`
-- `CENTRAL_TOKEN_PASS`
-- `GPG_PRIVATE_KEY` (ASCII-armored private key block with the mandatory RFC 4880 blank line immediately after `-----BEGIN PGP PRIVATE KEY BLOCK-----`, or base64-encoded binary key export)
-- `GPG_PASSPHRASE`
-- `GPG_KEY_ID` (optional)
-- `RELEASE_PAT`, with `contents: write` permission to push commits and tags on `main`
+## Verificação Local Pré-Release
 
-`RELEASE_PAT` is required because tags pushed by `GITHUB_TOKEN` do not trigger the separate `push: tags: v*` publication workflow.
+Antes de acionar a release via workflow:
 
-## Release flow
+```powershell
+mvn -B clean verify
+```
 
-1. Confirm `praxis-authz-contracts`, `praxis-authz-enforcement-core`, and `praxis-authz-opa` at `<version>` are already live (`HTTP 200`) on `repo1.maven.org`.
-2. Confirm the intended commit is on remote `main` and local validation passes with JDK 21:
+Garanta que:
+- Toda a matriz `P01..P64`, testes de auto-configuração Spring Boot e integrações com `AbstractBaseResourceService` passaram;
+- Não existam referências `-SNAPSHOT` no `pom.xml`;
+- As tabelas de propriedades `praxis.authz.*` e histórico em `CHANGELOG.md` reflitam a versão alvo.
 
-   ```powershell
-   mvn -B clean verify
-   ```
+## Fluxo Oficial no GitHub Actions
 
-3. In GitHub Actions, run **Release Praxis Authz Starter** (`workflow_dispatch`) on `main` with `create_tag=true` and either an explicit `version` matching upstream modules or `bump`/`preid`.
-4. The `create_tag` job verifies upstream `.pom` availability on Maven Central, persists the resolved version in `pom.xml`, creates the annotated `v<semver>` tag, and pushes `HEAD:main` and the tag atomically.
-5. The `publish` job verifies tag ancestry on `main`, imports the GPG key, enforces module boundaries, runs all starter and integration tests, flattens the published POM (`oss` mode), signs `.pom`/`.jar`/`-sources.jar`/`-javadoc.jar`, publishes via `central-publishing-maven-plugin`, and polls `repo1.maven.org` until the `.pom` returns `HTTP 200`.
-6. After publication succeeds, downstream hosts (such as `praxis-ergon-showcase`) should pin `<praxis.authz.version>` to the released public version and verify resolution from Maven Central.
-7. Before running `mvn install` locally for new unreleased work, bump `<version>` to the next `-SNAPSHOT` (e.g. `0.1.0-beta.2-SNAPSHOT`) so local builds do not overwrite published release artifacts in `~/.m2`.
-8. Run an isolated clean `.m2` consumer smoke test (`mvn -B -Dmaven.repo.local=<temp-dir> dependency:tree`) depending on `io.github.codexrodrigues:praxis-authz-starter:<version>` before announcing adoption; a local Maven install is not release evidence.
-
-Do not create release tags manually, run `mvn deploy` locally, or bypass a failed CI/release gate.
+- `ci.yml` executa **apenas** via `workflow_dispatch`;
+- `release.yml` executa via `workflow_dispatch` ou tag `v*` aprovada, publicando via `central-publishing-maven-plugin`.

@@ -1,19 +1,19 @@
-# Changelog
+# Histórico de Alterações (Changelog)
 
-All notable changes to `praxis-authz-starter` are documented in this file.
+Todas as mudanças relevantes de `praxis-authz-starter` são documentadas neste arquivo.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+O formato segue o padrão [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0-beta.1] - 2026-11-15
 
-### Added
-- Initial Maven Central beta publication of `io.github.codexrodrigues:praxis-authz-starter:0.1.0-beta.1` on Spring Boot `3.5.15`.
-- Auto-configuration (`PraxisAuthzAutoConfiguration`, `PraxisAuthzHostBridgeAutoConfiguration`, `PraxisAuthzProperties`) with single-authoritative-provider checks (`AUTHZ_BOOTSTRAP_MISSING_PROVIDER`, `AUTHZ_BOOTSTRAP_AMBIGUOUS_PROVIDERS`), startup compatibility verification (`HostPolicyCompatibilityStartupVerifier`), and Actuator health integration (`PraxisAuthzReadinessHealthIndicator`).
-- Full `praxis-metadata-starter` governed host hierarchy:
-  - `AbstractAuthzGovernedResourceService` & `AbstractAuthzGovernedReadOnlyResourceService` enforcing `STEP_11` pre-hydration write authorization before business rules, `JpaCriteriaDataScopeTranslator`, and `AuthzMaskingResourceMapperDecorator`;
-  - Zero-blueprint `AuthzResourceGovernanceSpec.fromAnnotatedResource(...)` and `AuthzHostPolicyBootstrapBuilder`;
-  - Architectural readiness audit (`AuthzHostReadinessReviewer`: `AUTHZ-HOST-001` through `AUTHZ-HOST-014`);
-  - `AuthzResourceOperationAvailabilityProvider` (wired ahead of `NoOpResourceOperationAvailabilityProvider`), `AuthzGovernedStatsQueryExecutor`, `AuthzGovernedOptionSourceProvider`, `AuthzGovernedReactiveDeterminationProvider`, `AuthzGovernedBulkDomainResourceAdapter`, and `AuthzGovernedCollectionExportExecutor`.
-- `PraxisAuthzExceptionHandler` (`@RestControllerAdvice` at `Ordered.HIGHEST_PRECEDENCE`) translating fail-closed authorization, spoofing, field-use, field-write, and provider unavailability exceptions into structured HTTP `401`, `403`, and `503` responses.
-- Transactional JDBC audit outbox (`JdbcTransactionalAuditOutbox`, `JdbcAuditOutboxRelayExecutor`), PostgreSQL RLS session isolation (`JdbcSessionContextIsolationGuard`), governed reentrant channel executor (`GovernedChannelInvocationExecutor`), collection export guard (`GovernedCollectionExportGuard`), PAP catalog service (`SemanticDecisionPointCatalogService`), and control-plane OPA reconciler (`ConfigMaterializationToOpaReconciler`).
-- Comprehensive conformance suite (`P01..P64`, HTTP/reentrant integration, real `AbstractBaseResourceService` integration, and cross-host dual-scope delegation).
+### Adicionado
+- Publicação beta inicial no Maven Central de `io.github.codexrodrigues:praxis-authz-starter:0.1.0-beta.1` sobre Spring Boot `3.5.15`.
+- Auto-configuração (`PraxisAuthzAutoConfiguration`, `PraxisAuthzHostBridgeAutoConfiguration`, `PraxisAuthzProperties`) com validação de provedor autoritativo único (`AUTHZ_BOOTSTRAP_MISSING_PROVIDER`, `AUTHZ_BOOTSTRAP_AMBIGUOUS_PROVIDERS`), handshake de compatibilidade no startup (`HostPolicyCompatibilityStartupVerifier`) e health check Actuator (`PraxisAuthzReadinessHealthIndicator`).
+- Hierarquia completa de serviços governados integrada ao `praxis-metadata-starter`:
+  - `AbstractAuthzGovernedResourceService` e `AbstractAuthzGovernedReadOnlyResourceService` impondo `STEP_11` pré-hidratação antes das regras de negócio, `JpaCriteriaDataScopeTranslator` e `AuthzMaskingResourceMapperDecorator`;
+  - Introspecção Zero-Blueprint `AuthzResourceGovernanceSpec.fromAnnotatedResource(...)` e `AuthzHostPolicyBootstrapBuilder`;
+  - Auditoria arquitetural de prontidão (`AuthzHostReadinessReviewer`: `AUTHZ-HOST-001` a `AUTHZ-HOST-014`);
+  - `AuthzResourceOperationAvailabilityProvider` (priorizado antes de `NoOpResourceOperationAvailabilityProvider`), `AuthzGovernedStatsQueryExecutor`, `AuthzGovernedOptionSourceProvider`, `AuthzGovernedReactiveDeterminationProvider`, `AuthzGovernedBulkDomainResourceAdapter` e `AuthzGovernedCollectionExportExecutor`.
+- `PraxisAuthzExceptionHandler` (`@RestControllerAdvice` em `Ordered.HIGHEST_PRECEDENCE`) traduzindo exceções *fail-closed* de autorização, spoofing, uso/escrita de campos e indisponibilidade do provedor para respostas estruturadas HTTP `401`, `403` e `503`.
+- Audit outbox transacional via JDBC (`JdbcTransactionalAuditOutbox`, `JdbcAuditOutboxRelayExecutor`), isolamento de sessão PostgreSQL RLS (`JdbcSessionContextIsolationGuard`), executor de canais reentrantes (`GovernedChannelInvocationExecutor`), guarda de exportação (`GovernedCollectionExportGuard`), catálogo PAP (`SemanticDecisionPointCatalogService`) e reconciliador OPA para o control plane (`ConfigMaterializationToOpaReconciler`).
+- Suíte completa de conformidade (`P01..P64`, integração HTTP/reentrante, integração real com `AbstractBaseResourceService` e delegação *dual-scope* entre hosts).
