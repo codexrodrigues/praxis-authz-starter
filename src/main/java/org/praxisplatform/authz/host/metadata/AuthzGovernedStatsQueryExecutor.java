@@ -16,6 +16,7 @@ import org.praxisplatform.authz.enforcement.fielduse.FieldUseViolationException;
 import org.praxisplatform.authz.enforcement.masking.DtoFieldSchemaMetadata;
 import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.AuthorizedQueryScopeContext;
+import org.praxisplatform.uischema.stats.DistributionMode;
 import org.praxisplatform.uischema.stats.StatsFieldDescriptor;
 import org.praxisplatform.uischema.stats.StatsFieldRegistry;
 import org.praxisplatform.uischema.stats.StatsMetric;
@@ -110,6 +111,7 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
             GroupByStatsRequest<?> request,
             int maxBuckets
     ) {
+        AuthzGovernedResourceServiceSupport.FrameCheckpoint checkpoint = serviceSupport.openFrameScope();
         registerOrScheduleContextCleanup();
         try {
             enforceStatsFieldUses(
@@ -128,7 +130,9 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
                     maxBuckets
             );
         } finally {
-            clearIfNoTransactionSynchronization();
+            if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+                serviceSupport.restoreFrameScope(checkpoint);
+            }
         }
     }
 
@@ -144,6 +148,7 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
             int maxBuckets,
             int maxCells
     ) {
+        AuthzGovernedResourceServiceSupport.FrameCheckpoint checkpoint = serviceSupport.openFrameScope();
         registerOrScheduleContextCleanup();
         try {
             List<StatsFieldDescriptor> dimensionDescriptors = new ArrayList<>();
@@ -172,7 +177,9 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
                     maxCells
             );
         } finally {
-            clearIfNoTransactionSynchronization();
+            if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+                serviceSupport.restoreFrameScope(checkpoint);
+            }
         }
     }
 
@@ -186,6 +193,7 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
             TimeSeriesStatsRequest<?> request,
             int maxPoints
     ) {
+        AuthzGovernedResourceServiceSupport.FrameCheckpoint checkpoint = serviceSupport.openFrameScope();
         registerOrScheduleContextCleanup();
         try {
             enforceStatsFieldUses(
@@ -204,7 +212,9 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
                     maxPoints
             );
         } finally {
-            clearIfNoTransactionSynchronization();
+            if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+                serviceSupport.restoreFrameScope(checkpoint);
+            }
         }
     }
 
@@ -218,6 +228,7 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
             DistributionStatsRequest<?> request,
             int maxBuckets
     ) {
+        AuthzGovernedResourceServiceSupport.FrameCheckpoint checkpoint = serviceSupport.openFrameScope();
         registerOrScheduleContextCleanup();
         try {
             List<ResolvedStatsMetric> metrics = new ArrayList<>();
@@ -228,7 +239,8 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
                     distributionDescriptor == null ? List.of() : List.of(distributionDescriptor),
                     metrics,
                     null,
-                    request == null ? null : request.filter()
+                    request == null ? null : request.filter(),
+                    request != null && request.mode() == DistributionMode.HISTOGRAM
             );
             return delegate.executeDistribution(
                     entityManager,
@@ -240,7 +252,9 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
                     maxBuckets
             );
         } finally {
-            clearIfNoTransactionSynchronization();
+            if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+                serviceSupport.restoreFrameScope(checkpoint);
+            }
         }
     }
 
@@ -302,6 +316,16 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
             String explicitPeriodField,
             Object filterPayload
     ) {
+        enforceStatsFieldUses(groupDescriptors, resolvedMetrics, explicitPeriodField, filterPayload, false);
+    }
+
+    private void enforceStatsFieldUses(
+            Collection<StatsFieldDescriptor> groupDescriptors,
+            Collection<ResolvedStatsMetric> resolvedMetrics,
+            String explicitPeriodField,
+            Object filterPayload,
+            boolean includeGroupDescriptorsAsAggregate
+    ) {
         Set<String> requestedFilterAttributes = new LinkedHashSet<>();
         if (filterPayload != null) {
             Map<FieldUseCategory, Set<String>> extracted = serviceSupport.dtoIntrospector().extractQueryFieldUses(
@@ -330,6 +354,13 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
         }
 
         Set<String> requestedAggregateAttributes = new LinkedHashSet<>();
+        if (includeGroupDescriptorsAsAggregate && groupDescriptors != null) {
+            for (StatsFieldDescriptor desc : groupDescriptors) {
+                if (desc != null) {
+                    requestedAggregateAttributes.addAll(resolveCandidateAttributeIds(desc));
+                }
+            }
+        }
         if (resolvedMetrics != null) {
             for (ResolvedStatsMetric resolvedMetric : resolvedMetrics) {
                 if (resolvedMetric == null) {
@@ -459,12 +490,6 @@ public final class AuthzGovernedStatsQueryExecutor implements StatsQueryExecutor
                     }
                 });
             }
-        }
-    }
-
-    private void clearIfNoTransactionSynchronization() {
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            serviceSupport.clearTransientRequestContexts();
         }
     }
 }

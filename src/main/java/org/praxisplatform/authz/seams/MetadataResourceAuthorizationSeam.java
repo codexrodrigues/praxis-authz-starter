@@ -48,6 +48,8 @@ import org.praxisplatform.authz.enforcement.pipeline.AuthorizationProviderPort.S
 import org.praxisplatform.authz.enforcement.writeintent.DtoWriteIntentExtractor;
 import org.praxisplatform.authz.enforcement.writeintent.FieldWriteAuthorizer;
 import org.praxisplatform.authz.enforcement.writeintent.FieldWriteViolationException;
+import org.praxisplatform.authz.host.metadata.AuthzAccessDeniedException;
+import org.praxisplatform.authz.host.metadata.AuthzProviderUnavailableException;
 import org.praxisplatform.authz.telemetry.SanitizedAuthorizationTelemetryPublisher;
 
 /**
@@ -328,7 +330,12 @@ public final class MetadataResourceAuthorizationSeam {
         publishTelemetryIfConfigured(trustedSubjectFacts, decisionPoint, envelope);
         if (envelope.gateOutcome() != GateOutcome.ALLOW) {
             fulfillDenyObligations(decisionPoint.identity().pointKey(), envelope);
-            throw new SecurityException("AUTHZ_QUERY_SEAM_DENIED: " + envelope.gateOutcome());
+            throw toGateFailureException(
+                    "AUTHZ_QUERY_SEAM_DENIED",
+                    decisionPoint.identity().pointKey(),
+                    envelope.gateOutcome(),
+                    "AUTHZ_QUERY_SEAM_DENIED: " + envelope.gateOutcome()
+            );
         }
 
         List<FieldUseEffectDirective> combinedDirectives = new ArrayList<>(initialDirectives);
@@ -421,7 +428,12 @@ public final class MetadataResourceAuthorizationSeam {
         publishTelemetryIfConfigured(trustedSubjectFacts, decisionPoint, envelope);
         if (envelope.gateOutcome() != GateOutcome.ALLOW) {
             fulfillDenyObligations(decisionPoint.identity().pointKey(), envelope);
-            throw new SecurityException("AUTHZ_QUERY_SEAM_DENIED: " + envelope.gateOutcome());
+            throw toGateFailureException(
+                    "AUTHZ_QUERY_SEAM_DENIED",
+                    decisionPoint.identity().pointKey(),
+                    envelope.gateOutcome(),
+                    "AUTHZ_QUERY_SEAM_DENIED: " + envelope.gateOutcome()
+            );
         }
 
         List<FieldUseEffectDirective> combinedDirectives = new ArrayList<>(initialDirectives);
@@ -503,8 +515,13 @@ public final class MetadataResourceAuthorizationSeam {
         publishTelemetryIfConfigured(trustedTargetFacts, decisionPoint, envelope);
         if (envelope.gateOutcome() != GateOutcome.ALLOW) {
             fulfillDenyObligations(pointKey, envelope);
-            throw new SecurityException("AUTHZ_TARGET_ENTITY_ACCESS_DENIED: Target entity access denied ("
-                    + envelope.gateOutcome() + ") on '" + pointKey + "'");
+            throw toGateFailureException(
+                    "AUTHZ_TARGET_ENTITY_ACCESS_DENIED",
+                    pointKey,
+                    envelope.gateOutcome(),
+                    "AUTHZ_TARGET_ENTITY_ACCESS_DENIED: Target entity access denied ("
+                            + envelope.gateOutcome() + ") on '" + pointKey + "'"
+            );
         }
         Set<String> fieldWriteDenied = new LinkedHashSet<>();
         if (envelope.combinedFieldWriteEffects() != null) {
@@ -602,7 +619,12 @@ public final class MetadataResourceAuthorizationSeam {
                             + change.attributeId() + "' cannot be cleared or omitted (CC06/P13/P14)");
                 }
             }
-            throw new SecurityException("AUTHZ_MUTATION_SEAM_DENIED: " + envelope.gateOutcome());
+            throw toGateFailureException(
+                    "AUTHZ_MUTATION_SEAM_DENIED",
+                    decisionPoint.identity().pointKey(),
+                    envelope.gateOutcome(),
+                    "AUTHZ_MUTATION_SEAM_DENIED: " + envelope.gateOutcome()
+            );
         }
 
         try {
@@ -809,7 +831,12 @@ public final class MetadataResourceAuthorizationSeam {
         publishTelemetryIfConfigured(mergedFacts, decisionPoint, envelope);
         if (envelope.gateOutcome() != GateOutcome.ALLOW) {
             fulfillDenyObligations(decisionPoint.identity().pointKey(), envelope);
-            throw new SecurityException("AUTHZ_WORKER_ITEM_TARGET_DENIED: Bulk worker item denied with " + envelope.gateOutcome() + " (P15/P18)");
+            throw toGateFailureException(
+                    "AUTHZ_WORKER_ITEM_TARGET_DENIED",
+                    decisionPoint.identity().pointKey(),
+                    envelope.gateOutcome(),
+                    "AUTHZ_WORKER_ITEM_TARGET_DENIED: Bulk worker item denied with " + envelope.gateOutcome() + " (P15/P18)"
+            );
         }
         try {
             fieldWriteAuthorizer.enforceFieldWriteDirectives(itemWriteIntent, envelope.combinedFieldWriteEffects(), true);
@@ -1314,6 +1341,18 @@ public final class MetadataResourceAuthorizationSeam {
                 .filter(Objects::nonNull)
                 .distinct()
                 .toList();
+    }
+
+    private static RuntimeException toGateFailureException(
+            String reasonCode,
+            String decisionPointKey,
+            GateOutcome gateOutcome,
+            String message
+    ) {
+        if (gateOutcome == GateOutcome.TECHNICAL_ERROR || gateOutcome == GateOutcome.INCONCLUSIVE) {
+            return new AuthzProviderUnavailableException(reasonCode, decisionPointKey, gateOutcome, message);
+        }
+        return new AuthzAccessDeniedException(reasonCode, decisionPointKey, gateOutcome, message);
     }
 
     /**

@@ -2,7 +2,9 @@ package org.praxisplatform.authz.host.metadata;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 import org.praxisplatform.authz.enforcement.masking.DtoFieldSchemaMetadata;
+import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.TargetReadProjectionEvaluation;
 import org.praxisplatform.uischema.mapper.base.ResourceMapper;
 
 /**
@@ -24,6 +26,7 @@ public final class AuthzMaskingResourceMapperDecorator<E, R, C, U, ID>
     private final AuthzGovernedResourceServiceSupport serviceSupport;
     private final Class<R> responseType;
     private final List<DtoFieldSchemaMetadata> fieldSchemas;
+    private final Function<E, TargetReadProjectionEvaluation> targetEvalResolver;
 
     /**
      * Creates a masking decorator around a host {@link ResourceMapper}.
@@ -39,10 +42,25 @@ public final class AuthzMaskingResourceMapperDecorator<E, R, C, U, ID>
             Class<R> responseType,
             List<DtoFieldSchemaMetadata> fieldSchemas
     ) {
+        this(delegate, serviceSupport, responseType, fieldSchemas, null);
+    }
+
+    /**
+     * Creates a masking decorator around a host {@link ResourceMapper} with an optional per-row
+     * contextual {@code TARGET} evaluator ({@code P12}).
+     */
+    public AuthzMaskingResourceMapperDecorator(
+            ResourceMapper<E, R, C, U, ID> delegate,
+            AuthzGovernedResourceServiceSupport serviceSupport,
+            Class<R> responseType,
+            List<DtoFieldSchemaMetadata> fieldSchemas,
+            Function<E, TargetReadProjectionEvaluation> targetEvalResolver
+    ) {
         this.delegate = Objects.requireNonNull(delegate, "delegate is required");
         this.serviceSupport = Objects.requireNonNull(serviceSupport, "serviceSupport is required");
         this.responseType = Objects.requireNonNull(responseType, "responseType is required");
         this.fieldSchemas = List.copyOf(Objects.requireNonNull(fieldSchemas, "fieldSchemas is required"));
+        this.targetEvalResolver = targetEvalResolver;
     }
 
     @Override
@@ -51,7 +69,7 @@ public final class AuthzMaskingResourceMapperDecorator<E, R, C, U, ID>
         if (rawResponse == null) {
             return null;
         }
-        return serviceSupport.maskMapperResponseIfReady(rawResponse, responseType, fieldSchemas);
+        return serviceSupport.maskMapperResponseIfReady(entity, rawResponse, responseType, fieldSchemas, targetEvalResolver);
     }
 
     @Override

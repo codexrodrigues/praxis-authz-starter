@@ -8,13 +8,17 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import org.praxisplatform.authz.contracts.context.FactResolutionStatus;
+import org.praxisplatform.authz.contracts.datascope.DataScopeOutcome;
 import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor;
 import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
 import org.praxisplatform.authz.contracts.envelope.FieldUseEffectDirective;
@@ -77,13 +81,55 @@ public final class AuthzGovernedResourceServiceSupport {
     private final MetadataDtoGovernanceIntrospector dtoIntrospector;
     private final ObjectMapper objectMapper;
 
-    private final ThreadLocal<AuthorizedQueryScopeContext> activeQueryContext = new ThreadLocal<>();
-    private final ThreadLocal<AuthorizedPreMutationContext> activeMutationContext = new ThreadLocal<>();
-    private final ThreadLocal<Boolean> mutationReadyForResponseMasking = new ThreadLocal<>();
-    private final ThreadLocal<List<MaskDirective>> activeExportMaskDirectives = new ThreadLocal<>();
-    private final ThreadLocal<Set<String>> activeExportValueDeniedAttributeIds = new ThreadLocal<>();
-    private final ThreadLocal<Deque<AuthorizedPreMutationContext>> pendingDeleteContexts = new ThreadLocal<>();
+    private static final Object DEFAULT_OWNER = new Object();
+    private static final Object TX_CLEANUP_KEY = new Object();
+
+    private sealed interface AuthorizationFrame permits QueryFrame, MutationFrame {
+        Object owner();
+    }
+
+    private record QueryFrame(Object owner, AuthorizedQueryScopeContext context) implements AuthorizationFrame {}
+
+    private record MutationFrame(Object owner, AuthorizedPreMutationContext context, boolean readyForMasking)
+            implements AuthorizationFrame {}
+
+    private record ExportMaskFrame(List<MaskDirective> maskDirectives, Set<String> valueDeniedAttributeIds) {}
+
+    /**
+     * Reentrant call-stack checkpoint capturing authorization, export, and extracted-field-use
+     * stacks so nested service invocations restore outer frames deterministically in {@code finally}
+     * without wiping them.
+     */
+    public static final class FrameCheckpoint {
+        private final List<AuthorizationFrame> frames;
+        private final List<ExportMaskFrame> exportFrames;
+        private final Map<FieldUseCategory, Set<String>> extractedFieldUses;
+
+        private FrameCheckpoint(
+                List<AuthorizationFrame> frames,
+                List<ExportMaskFrame> exportFrames,
+                Map<FieldUseCategory, Set<String>> extractedFieldUses
+        ) {
+            this.frames = frames;
+            this.exportFrames = exportFrames;
+            this.extractedFieldUses = extractedFieldUses;
+        }
+
+        public int frameDepth() {
+            return frames.size();
+        }
+
+        public int exportDepth() {
+            return exportFrames.size();
+        }
+    }
+
+    private final ThreadLocal<Deque<AuthorizationFrame>> frameStack = ThreadLocal.withInitial(ArrayDeque::new);
+    private final ThreadLocal<Deque<ExportMaskFrame>> exportFrameStack = ThreadLocal.withInitial(ArrayDeque::new);
+    private final ThreadLocal<Map<Object, Deque<AuthorizedPreMutationContext>>> pendingDeleteContextsByOwner =
+            ThreadLocal.withInitial(IdentityHashMap::new);
     private final ThreadLocal<Map<FieldUseCategory, Set<String>>> activeExtractedQueryFieldUses = new ThreadLocal<>();
+    private final ThreadLocal<IntrospectedDtoGovernanceContract> currentThreadContract = new ThreadLocal<>();
     private volatile IntrospectedDtoGovernanceContract lastIntrospectedContract;
 
     /**
@@ -133,9 +179,28 @@ public final class AuthzGovernedResourceServiceSupport {
             Class<R> responseType,
             String resourceKey
     ) {
+        return wrapResourceMapper(delegate, responseType, resourceKey, null);
+    }
+
+    /**
+     * Wraps a host {@link ResourceMapper} in an {@link AuthzMaskingResourceMapperDecorator} with an
+     * optional per-record contextual {@code TARGET} evaluator ({@code P12}).
+     */
+    public <E, R, C, U, ID> ResourceMapper<E, R, C, U, ID> wrapResourceMapper(
+            ResourceMapper<E, R, C, U, ID> delegate,
+            Class<R> responseType,
+            String resourceKey,
+            Function<E, TargetReadProjectionEvaluation> targetEvalResolver
+    ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
-        return new AuthzMaskingResourceMapperDecorator<>(delegate, this, responseType, contract.fieldSchemas());
+        recordIntrospectedContract(contract);
+        return new AuthzMaskingResourceMapperDecorator<>(
+                delegate,
+                this,
+                responseType,
+                contract.fieldSchemas(),
+                targetEvalResolver
+        );
     }
 
     /**
@@ -149,7 +214,7 @@ public final class AuthzGovernedResourceServiceSupport {
             String resourceKey
     ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
+        recordIntrospectedContract(contract);
         return new AuthzGovernedCollectionExportExecutor(
                 delegate,
                 maskingProcessor,
@@ -186,7 +251,7 @@ public final class AuthzGovernedResourceServiceSupport {
     public <ID, F> AuthzGovernedBulkDomainResourceAdapter<ID, F> wrapBulkDomainResourceAdapter(
             BulkDomainResourceAdapter<ID, F> delegate
     ) {
-        return new AuthzGovernedBulkDomainResourceAdapter<>(delegate, this, lastIntrospectedContract);
+        return new AuthzGovernedBulkDomainResourceAdapter<>(delegate, this, resolveIntrospectedContract(null));
     }
 
     /**
@@ -214,7 +279,7 @@ public final class AuthzGovernedResourceServiceSupport {
             AuthzResourceGovernanceSpec<?> governanceSpec
     ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
+        recordIntrospectedContract(contract);
         return new AuthzGovernedBulkDomainResourceAdapter<>(delegate, this, contract, governanceSpec);
     }
 
@@ -249,7 +314,7 @@ public final class AuthzGovernedResourceServiceSupport {
             AuthzResourceGovernanceSpec<?> governanceSpec
     ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
+        recordIntrospectedContract(contract);
         return new AuthzGovernedOptionSourceProvider(delegate, this, maskingProcessor, contract, governanceSpec);
     }
 
@@ -283,7 +348,7 @@ public final class AuthzGovernedResourceServiceSupport {
             AuthzResourceGovernanceSpec<?> governanceSpec
     ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
+        recordIntrospectedContract(contract);
         return new AuthzGovernedOptionSourceProvider(delegate, this, maskingProcessor, contract, governanceSpec);
     }
 
@@ -318,7 +383,7 @@ public final class AuthzGovernedResourceServiceSupport {
             AuthzResourceGovernanceSpec<?> governanceSpec
     ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
+        recordIntrospectedContract(contract);
         return new AuthzGovernedStatsQueryExecutor(delegate, this, contract, governanceSpec);
     }
 
@@ -340,7 +405,7 @@ public final class AuthzGovernedResourceServiceSupport {
             String resourceKey
     ) {
         IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
-        this.lastIntrospectedContract = contract;
+        recordIntrospectedContract(contract);
         return new AuthzGovernedReactiveDeterminationProvider(delegate, this, contract);
     }
 
@@ -361,6 +426,7 @@ public final class AuthzGovernedResourceServiceSupport {
     ) {
         Objects.requireNonNull(delegate, "delegate is required");
         return request -> {
+            FrameCheckpoint checkpoint = openFrameScope();
             try {
                 return delegate.execute(request);
             } catch (FieldWriteViolationException ex) {
@@ -379,9 +445,7 @@ public final class AuthzGovernedResourceServiceSupport {
                         Map.of("reasonCode", "AUTHZ_COMMAND_SECURITY_DENIED")
                 );
             } finally {
-                activeQueryContext.remove();
-                activeMutationContext.remove();
-                mutationReadyForResponseMasking.remove();
+                restoreFrameScope(checkpoint);
             }
         };
     }
@@ -393,8 +457,111 @@ public final class AuthzGovernedResourceServiceSupport {
      *
      * @return {@code true} when a query authorization context is active
      */
+    public FrameCheckpoint openFrameScope() {
+        return new FrameCheckpoint(
+                new ArrayList<>(frameStack.get()),
+                new ArrayList<>(exportFrameStack.get()),
+                activeExtractedQueryFieldUses.get()
+        );
+    }
+
+    public void restoreFrameScope(FrameCheckpoint checkpoint) {
+        if (checkpoint == null) {
+            return;
+        }
+        Deque<AuthorizationFrame> frames = frameStack.get();
+        frames.clear();
+        frames.addAll(checkpoint.frames);
+        if (frames.isEmpty()) {
+            frameStack.remove();
+        }
+
+        Deque<ExportMaskFrame> exports = exportFrameStack.get();
+        exports.clear();
+        exports.addAll(checkpoint.exportFrames);
+        if (exports.isEmpty()) {
+            exportFrameStack.remove();
+        }
+
+        if (checkpoint.extractedFieldUses == null) {
+            activeExtractedQueryFieldUses.remove();
+        } else {
+            activeExtractedQueryFieldUses.set(checkpoint.extractedFieldUses);
+        }
+    }
+
+    public <T> T executeInReentrancyScope(Supplier<T> action) {
+        Objects.requireNonNull(action, "action is required");
+        FrameCheckpoint checkpoint = openFrameScope();
+        try {
+            return action.get();
+        } finally {
+            restoreFrameScope(checkpoint);
+        }
+    }
+
+    public void executeInReentrancyScopeVoid(Runnable action) {
+        Objects.requireNonNull(action, "action is required");
+        FrameCheckpoint checkpoint = openFrameScope();
+        try {
+            action.run();
+        } finally {
+            restoreFrameScope(checkpoint);
+        }
+    }
+
+    private void recordIntrospectedContract(IntrospectedDtoGovernanceContract contract) {
+        if (contract != null) {
+            this.currentThreadContract.set(contract);
+            this.lastIntrospectedContract = contract;
+        }
+    }
+
+    private IntrospectedDtoGovernanceContract resolveIntrospectedContract(
+            IntrospectedDtoGovernanceContract explicitContract
+    ) {
+        if (explicitContract != null) {
+            return explicitContract;
+        }
+        IntrospectedDtoGovernanceContract threadContract = this.currentThreadContract.get();
+        return threadContract != null ? threadContract : this.lastIntrospectedContract;
+    }
+
+    private static Object normalizeOwner(Object owner) {
+        return owner == null ? DEFAULT_OWNER : owner;
+    }
+
+    private QueryFrame currentQueryFrame() {
+        for (AuthorizationFrame frame : frameStack.get()) {
+            if (frame instanceof QueryFrame qf) {
+                return qf;
+            }
+        }
+        return null;
+    }
+
+    private MutationFrame currentMutationFrame() {
+        for (AuthorizationFrame frame : frameStack.get()) {
+            if (frame instanceof MutationFrame mf) {
+                return mf;
+            }
+        }
+        return null;
+    }
+
+    private void popTopFramesForOwner(Object owner) {
+        Object normalized = normalizeOwner(owner);
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        while (!stack.isEmpty() && stack.peekFirst().owner() == normalized) {
+            stack.pollFirst();
+        }
+        if (stack.isEmpty()) {
+            frameStack.remove();
+        }
+    }
+
     public boolean hasActiveQueryContext() {
-        return activeQueryContext.get() != null;
+        return currentQueryFrame() != null;
     }
 
     /**
@@ -411,30 +578,49 @@ public final class AuthzGovernedResourceServiceSupport {
      * @param scopeInitializer callback that resolves and binds the query scope when none is active
      */
     public void ensureActiveQueryContext(Runnable scopeInitializer) {
+        ensureActiveQueryContext(null, scopeInitializer);
+    }
+
+    /**
+     * Owner-aware variant ensuring the top authorization frame on the stack is already a
+     * {@link QueryFrame} owned by {@code owner} before triggering {@code scopeInitializer}
+     * ({@code P10.4-R03}, reentrant {@code C-02}).
+     */
+    public void ensureActiveQueryContext(Object owner, Runnable scopeInitializer) {
         Objects.requireNonNull(scopeInitializer, "scopeInitializer is required");
-        if (activeQueryContext.get() == null) {
+        if (owner == null) {
+            if (!hasActiveQueryContext()) {
+                scopeInitializer.run();
+            }
+            return;
+        }
+        Object normalized = normalizeOwner(owner);
+        AuthorizationFrame top = frameStack.get().peekFirst();
+        if (!(top instanceof QueryFrame qf && qf.owner() == normalized)) {
             scopeInitializer.run();
         }
     }
 
     /** Returns the active per-request OPA {@link MaskDirective}s for collection export, or an empty list. */
     public List<MaskDirective> currentExportMaskDirectives() {
-        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
-        if (queryCtx != null && queryCtx.maskDirectives() != null) {
-            return queryCtx.maskDirectives();
+        QueryFrame queryFrame = currentQueryFrame();
+        if (queryFrame != null && queryFrame.context().maskDirectives() != null) {
+            return queryFrame.context().maskDirectives();
         }
-        List<MaskDirective> exportMasks = activeExportMaskDirectives.get();
-        return exportMasks == null ? List.of() : exportMasks;
+        ExportMaskFrame topExport = exportFrameStack.get().peekFirst();
+        return topExport == null || topExport.maskDirectives() == null ? List.of() : topExport.maskDirectives();
     }
 
     /** Returns the active per-request dynamically value-denied attribute IDs for collection export ({@code Fase P10.17-A}). */
     public Set<String> currentExportValueDeniedAttributeIds() {
-        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
-        if (queryCtx != null && queryCtx.valueDeniedAttributeIds() != null) {
-            return queryCtx.valueDeniedAttributeIds();
+        QueryFrame queryFrame = currentQueryFrame();
+        if (queryFrame != null && queryFrame.context().valueDeniedAttributeIds() != null) {
+            return queryFrame.context().valueDeniedAttributeIds();
         }
-        Set<String> exportValueDenied = activeExportValueDeniedAttributeIds.get();
-        return exportValueDenied == null ? Set.of() : exportValueDenied;
+        ExportMaskFrame topExport = exportFrameStack.get().peekFirst();
+        return topExport == null || topExport.valueDeniedAttributeIds() == null
+                ? Set.of()
+                : topExport.valueDeniedAttributeIds();
     }
 
     /**
@@ -472,7 +658,42 @@ public final class AuthzGovernedResourceServiceSupport {
             JpaCriteriaDataScopeTranslator criteriaTranslator,
             ResourceFilterAccessScope<E> hardScope
     ) {
-        clearContext();
+        return authorizeAndResolveAccessScope(
+                decisionPoint,
+                factContractDigest,
+                requestHeaderNames,
+                resolvedSubjectAndEnvFacts,
+                factStatuses,
+                requestedFieldUses,
+                baselineFieldUseDirectives,
+                jpaDataScopeAdapter,
+                hardScopeJpql,
+                hardScopeParams,
+                criteriaTranslator,
+                hardScope,
+                null
+        );
+    }
+
+    /**
+     * Owner-aware variant pushing a reentrant {@link QueryFrame} onto the LIFO authorization stack
+     * without wiping outer callers' frames.
+     */
+    public <E> ResourceFilterAccessScope<E> authorizeAndResolveAccessScope(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            Set<String> requestHeaderNames,
+            Map<String, Object> resolvedSubjectAndEnvFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            Map<FieldUseCategory, Set<String>> requestedFieldUses,
+            List<FieldUseEffectDirective> baselineFieldUseDirectives,
+            JpaDataScopeAdapter jpaDataScopeAdapter,
+            String hardScopeJpql,
+            Map<String, Object> hardScopeParams,
+            JpaCriteriaDataScopeTranslator criteriaTranslator,
+            ResourceFilterAccessScope<E> hardScope,
+            Object owner
+    ) {
         registerTransactionCleanupIfActive();
         AuthorizedQueryScopeContext queryCtx = authorizationSeam.authorizeAndCompileJpaQueryScope(
                 decisionPoint,
@@ -488,25 +709,34 @@ public final class AuthzGovernedResourceServiceSupport {
                 row -> true
         );
         List<MaskDirective> masks = queryCtx.maskDirectives() == null ? List.of() : queryCtx.maskDirectives();
-        activeExportMaskDirectives.set(masks);
         Set<String> valueDenied = queryCtx.valueDeniedAttributeIds() == null ? Set.of() : queryCtx.valueDeniedAttributeIds();
-        activeExportValueDeniedAttributeIds.set(valueDenied);
-        if (queryCtx.dataScopePlan() == null || queryCtx.scopeOutcome() == org.praxisplatform.authz.contracts.datascope.DataScopeOutcome.NONE) {
-            activeQueryContext.set(queryCtx);
+
+        Object normalizedOwner = normalizeOwner(owner);
+        if (normalizedOwner == DEFAULT_OWNER) {
+            popTopFramesForOwner(DEFAULT_OWNER);
+        }
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (normalizedOwner != DEFAULT_OWNER
+                && stack.peekFirst() instanceof QueryFrame topQuery
+                && topQuery.owner() == normalizedOwner) {
+            stack.pollFirst();
+        }
+        stack.addFirst(new QueryFrame(normalizedOwner, queryCtx));
+        exportFrameStack.get().addFirst(new ExportMaskFrame(masks, valueDenied));
+
+        if (queryCtx.dataScopePlan() == null || queryCtx.scopeOutcome() == DataScopeOutcome.NONE) {
             return ResourceFilterAccessScope.denied();
         }
-        ResourceFilterAccessScope<E> resolvedScope = criteriaTranslator.toResourceFilterAccessScope(
+        return criteriaTranslator.toResourceFilterAccessScope(
                 queryCtx.dataScopePlan(),
                 hardScope
         );
-        activeQueryContext.set(queryCtx);
-        return resolvedScope;
     }
 
     /**
      * Executes pre-hydration mutation authorization ({@code STEP_11}) before {@code hydrate*} and
-     * {@code PraxisRulesEngine} ({@code STEP_12}) and binds the {@link AuthorizedPreMutationContext}
-     * to the current thread ({@code R-11}, {@code P13}, {@code P14}).
+     * {@code PraxisRulesEngine} ({@code STEP_12}) and pushes the {@link AuthorizedPreMutationContext}
+     * onto the LIFO authorization stack ({@code R-11}, {@code P13}, {@code P14}).
      */
     public AuthorizedPreMutationContext authorizeBeforeHydrationAndRules(
             DecisionPointDescriptor decisionPoint,
@@ -523,7 +753,44 @@ public final class AuthzGovernedResourceServiceSupport {
             Map<String, Object> resolvedFacts,
             Map<String, FactResolutionStatus> factStatuses
     ) {
-        clearContext();
+        return authorizeBeforeHydrationAndRules(
+                decisionPoint,
+                factContractDigest,
+                operationVerb,
+                partialPatch,
+                rawPayloadOrJson,
+                wirePointerToAttributeIdMap,
+                technicalConcurrencyPointers,
+                mandatoryScopeAnchorAttributeIds,
+                dualScopeSpec,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                resolvedFacts,
+                factStatuses,
+                null
+        );
+    }
+
+    /**
+     * Owner-aware variant pushing a reentrant {@link MutationFrame} onto the LIFO authorization stack
+     * without wiping outer callers' frames or the enclosing {@link QueryFrame} during {@code update}.
+     */
+    public AuthorizedPreMutationContext authorizeBeforeHydrationAndRules(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            String operationVerb,
+            boolean partialPatch,
+            Object rawPayloadOrJson,
+            Map<String, String> wirePointerToAttributeIdMap,
+            Set<String> technicalConcurrencyPointers,
+            Set<String> mandatoryScopeAnchorAttributeIds,
+            DualScopeDelegationSpec dualScopeSpec,
+            boolean callerMatchesCedente,
+            boolean callerMatchesCessionario,
+            Map<String, Object> resolvedFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            Object owner
+    ) {
         registerTransactionCleanupIfActive();
         String rawJson;
         try {
@@ -548,23 +815,29 @@ public final class AuthzGovernedResourceServiceSupport {
                 resolvedFacts,
                 factStatuses
         );
-        activeMutationContext.set(preCtx);
-        mutationReadyForResponseMasking.set(Boolean.FALSE);
+        Object normalizedOwner = normalizeOwner(owner);
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (stack.peekFirst() instanceof MutationFrame topMutation && topMutation.owner() == normalizedOwner) {
+            stack.pollFirst();
+        }
+        stack.addFirst(new MutationFrame(normalizedOwner, preCtx, false));
         return preCtx;
     }
 
     /**
-     * Marks the current thread's mutation context ready for post-mutation outbox fulfillment and
-     * response masking inside {@link AuthzMaskingResourceMapperDecorator#toResponse(Object)}.
+     * Marks the top-most mutation frame ready for post-mutation outbox fulfillment and response masking
+     * inside {@link AuthzMaskingResourceMapperDecorator#toResponse(Object)}.
      *
      * <p>Invoke from {@code AbstractBaseResourceService.afterCreate(...)} / {@code afterUpdate(...)}.</p>
      */
     public void markPostMutationReadyForOutboxAndMasking() {
-        if (activeMutationContext.get() == null) {
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (!(stack.peekFirst() instanceof MutationFrame mf)) {
             throw new IllegalStateException(
                     "No AuthorizedPreMutationContext bound on current thread; authorizeBeforeHydrationAndRules must run in beforeCreate/beforeUpdate");
         }
-        mutationReadyForResponseMasking.set(Boolean.TRUE);
+        stack.pollFirst();
+        stack.addFirst(new MutationFrame(mf.owner(), mf.context(), true));
     }
 
     /**
@@ -582,11 +855,35 @@ public final class AuthzGovernedResourceServiceSupport {
             Map<String, Object> resolvedFacts,
             Map<String, FactResolutionStatus> factStatuses
     ) {
-        activeQueryContext.remove();
-        activeMutationContext.remove();
-        mutationReadyForResponseMasking.remove();
-        activeExportMaskDirectives.remove();
+        return authorizeBeforeDelete(
+                decisionPoint,
+                factContractDigest,
+                dualScopeSpec,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                resolvedFacts,
+                factStatuses,
+                null
+        );
+    }
+
+    /**
+     * Owner-aware variant isolating FIFO deletion queues per owning service across reentrant
+     * {@code ServiceA -> ServiceB} deletes.
+     */
+    public AuthorizedPreMutationContext authorizeBeforeDelete(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            DualScopeDelegationSpec dualScopeSpec,
+            boolean callerMatchesCedente,
+            boolean callerMatchesCessionario,
+            Map<String, Object> resolvedFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            Object owner
+    ) {
         registerTransactionCleanupIfActive();
+        Object normalizedOwner = normalizeOwner(owner);
+        popTopFramesForOwner(normalizedOwner);
 
         AuthorizedPreMutationContext preCtx = authorizationSeam.authorizePreHydrationMutation(
                 decisionPoint,
@@ -603,12 +900,9 @@ public final class AuthzGovernedResourceServiceSupport {
                 resolvedFacts,
                 factStatuses
         );
-        Deque<AuthorizedPreMutationContext> queue = pendingDeleteContexts.get();
-        if (queue == null) {
-            queue = new ArrayDeque<>();
-            pendingDeleteContexts.set(queue);
-        }
-        queue.addLast(preCtx);
+        pendingDeleteContextsByOwner.get()
+                .computeIfAbsent(normalizedOwner, ignored -> new ArrayDeque<>())
+                .addLast(preCtx);
         return preCtx;
     }
 
@@ -618,17 +912,27 @@ public final class AuthzGovernedResourceServiceSupport {
      * order ({@code STEP_14}, {@code CC10}, {@code P19}, {@code P22}).
      */
     public void completeAfterDeleteOutbox() {
-        Deque<AuthorizedPreMutationContext> queue = pendingDeleteContexts.get();
+        completeAfterDeleteOutbox(null);
+    }
+
+    /**
+     * Owner-aware variant fulfilling the next pending delete outbox for {@code owner} in FIFO order.
+     */
+    public void completeAfterDeleteOutbox(Object owner) {
+        Object normalizedOwner = normalizeOwner(owner);
+        Map<Object, Deque<AuthorizedPreMutationContext>> byOwner = pendingDeleteContextsByOwner.get();
+        Deque<AuthorizedPreMutationContext> queue = byOwner.get(normalizedOwner);
         AuthorizedPreMutationContext preCtx = queue == null ? null : queue.pollFirst();
         if (preCtx == null) {
             throw new IllegalStateException(
                     "No pending delete AuthorizedPreMutationContext on current thread; authorizeBeforeDelete must run in beforeDelete");
         }
         if (queue.isEmpty()) {
-            pendingDeleteContexts.remove();
-            activeQueryContext.remove();
-            activeMutationContext.remove();
-            mutationReadyForResponseMasking.remove();
+            byOwner.remove(normalizedOwner);
+            if (byOwner.isEmpty()) {
+                pendingDeleteContextsByOwner.remove();
+            }
+            popTopFramesForOwner(normalizedOwner);
         }
         authorizationSeam.completePostDeleteOutbox(preCtx);
     }
@@ -642,6 +946,20 @@ public final class AuthzGovernedResourceServiceSupport {
             Class<R> responseType,
             List<DtoFieldSchemaMetadata> fieldSchemas
     ) {
+        return maskMapperResponseIfReady(null, rawResponse, responseType, fieldSchemas, null);
+    }
+
+    /**
+     * Entity-aware variant supporting opt-in per-record contextual {@code TARGET} masking
+     * ({@code P12}) while strictly honoring the top LIFO {@link AuthorizationFrame}.
+     */
+    public <E, R> R maskMapperResponseIfReady(
+            E entity,
+            R rawResponse,
+            Class<R> responseType,
+            List<DtoFieldSchemaMetadata> fieldSchemas,
+            Function<E, TargetReadProjectionEvaluation> targetEvalResolver
+    ) {
         if (rawResponse == null) {
             return null;
         }
@@ -649,26 +967,47 @@ public final class AuthzGovernedResourceServiceSupport {
             // Internal AbstractBaseResourceService draft/custom-field/bulk projection (P13, P14)
             return rawResponse;
         }
-        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
-        if (preCtx != null) {
-            if (!Boolean.TRUE.equals(mutationReadyForResponseMasking.get())) {
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        AuthorizationFrame top = stack.peekFirst();
+        if (top instanceof MutationFrame mf) {
+            if (!mf.readyForMasking()) {
                 // Pre-mutation draft validation (STEP_12) sees raw unmasked values (P13, P14)
                 return rawResponse;
             }
-            try {
-                DetachedDtoMaskingResult masked = authorizationSeam.completePostMutationAndMask(
-                        preCtx,
-                        rawResponse,
-                        fieldSchemas
-                );
-                return objectMapper.convertValue(masked.detachedProjection(), responseType);
-            } finally {
-                activeMutationContext.remove();
-                mutationReadyForResponseMasking.remove();
+            stack.pollFirst();
+            if (stack.isEmpty()) {
+                frameStack.remove();
             }
+            DetachedDtoMaskingResult masked = authorizationSeam.completePostMutationAndMask(
+                    mf.context(),
+                    rawResponse,
+                    fieldSchemas
+            );
+            return objectMapper.convertValue(masked.detachedProjection(), responseType);
         }
-        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
-        if (queryCtx != null) {
+        if (top instanceof QueryFrame qf) {
+            AuthorizedQueryScopeContext queryCtx = qf.context();
+            if (queryCtx.scopeOutcome() == DataScopeOutcome.NONE) {
+                throw new AuthzAccessDeniedException(
+                        "AUTHZ_SCOPE_NONE",
+                        "Fail-closed: access denied by DataScopeOutcome.NONE during query projection");
+            }
+            if (targetEvalResolver != null && entity != null) {
+                TargetReadProjectionEvaluation targetEval = targetEvalResolver.apply(entity);
+                if (targetEval != null) {
+                    Set<String> mergedDenied = new LinkedHashSet<>(queryCtx.valueDeniedAttributeIds());
+                    mergedDenied.addAll(targetEval.valueDeniedAttributeIds());
+                    List<MaskDirective> mergedMasks = new ArrayList<>(queryCtx.maskDirectives());
+                    mergedMasks.addAll(targetEval.maskDirectives());
+                    DetachedDtoMaskingResult masked = maskingProcessor.projectAndMask(
+                            rawResponse,
+                            fieldSchemas,
+                            mergedDenied,
+                            mergedMasks
+                    );
+                    return objectMapper.convertValue(masked.detachedProjection(), responseType);
+                }
+            }
             List<DetachedDtoMaskingResult> maskedList = authorizationSeam.projectAndMaskQueryResults(
                     queryCtx,
                     List.of(rawResponse),
@@ -696,14 +1035,23 @@ public final class AuthzGovernedResourceServiceSupport {
     }
 
     private void registerTransactionCleanupIfActive() {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCompletion(int status) {
-                    clearContext();
-                }
-            });
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            return;
         }
+        if (TransactionSynchronizationManager.hasResource(TX_CLEANUP_KEY)) {
+            return;
+        }
+        TransactionSynchronizationManager.bindResource(TX_CLEANUP_KEY, Boolean.TRUE);
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                try {
+                    clearContext();
+                } finally {
+                    TransactionSynchronizationManager.unbindResourceIfPossible(TX_CLEANUP_KEY);
+                }
+            }
+        });
     }
 
     /**
@@ -711,9 +1059,15 @@ public final class AuthzGovernedResourceServiceSupport {
      * and clears thread-local query/mutation contexts while keeping export mask directives until transaction end.
      */
     public void completeBatchEnrichResponses() {
-        activeQueryContext.remove();
-        activeMutationContext.remove();
-        mutationReadyForResponseMasking.remove();
+        completeBatchEnrichResponses(null);
+    }
+
+    /**
+     * Owner-aware variant popping consecutive top frames owned by {@code owner} while preserving
+     * outer callers' frames and export mask directives.
+     */
+    public void completeBatchEnrichResponses(Object owner) {
+        popTopFramesForOwner(owner);
     }
 
     /**
@@ -721,10 +1075,21 @@ public final class AuthzGovernedResourceServiceSupport {
      * or command aborts with an exception ({@code P10.10-R02}).
      */
     public void clearMutationAndQueryContextsOnFailure() {
-        activeQueryContext.remove();
-        activeMutationContext.remove();
-        mutationReadyForResponseMasking.remove();
-        pendingDeleteContexts.remove();
+        clearMutationAndQueryContextsOnFailure(null);
+    }
+
+    /**
+     * Owner-aware variant clearing consecutive top frames and pending delete queues only for
+     * {@code owner}, never wiping outer callers' frames.
+     */
+    public void clearMutationAndQueryContextsOnFailure(Object owner) {
+        Object normalizedOwner = normalizeOwner(owner);
+        popTopFramesForOwner(normalizedOwner);
+        Map<Object, Deque<AuthorizedPreMutationContext>> byOwner = pendingDeleteContextsByOwner.get();
+        byOwner.remove(normalizedOwner);
+        if (byOwner.isEmpty()) {
+            pendingDeleteContextsByOwner.remove();
+        }
     }
 
     /**
@@ -737,22 +1102,21 @@ public final class AuthzGovernedResourceServiceSupport {
             Class<ResponseDTO> responseType,
             List<DtoFieldSchemaMetadata> fieldSchemas
     ) {
-        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
-        if (preCtx == null) {
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (!(stack.peekFirst() instanceof MutationFrame mf)) {
             throw new IllegalStateException(
                     "No AuthorizedPreMutationContext bound on current thread; authorizeBeforeHydrationAndRules must run before mutation");
         }
-        try {
-            DetachedDtoMaskingResult masked = authorizationSeam.completePostMutationAndMask(
-                    preCtx,
-                    responseDto,
-                    fieldSchemas
-            );
-            return objectMapper.convertValue(masked.detachedProjection(), responseType);
-        } finally {
-            activeMutationContext.remove();
-            mutationReadyForResponseMasking.remove();
+        stack.pollFirst();
+        if (stack.isEmpty()) {
+            frameStack.remove();
         }
+        DetachedDtoMaskingResult masked = authorizationSeam.completePostMutationAndMask(
+                mf.context(),
+                responseDto,
+                fieldSchemas
+        );
+        return objectMapper.convertValue(masked.detachedProjection(), responseType);
     }
 
     /**
@@ -765,9 +1129,10 @@ public final class AuthzGovernedResourceServiceSupport {
             Class<ResponseDTO> responseType,
             List<DtoFieldSchemaMetadata> fieldSchemas
     ) {
-        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        QueryFrame qf = stack.peekFirst() instanceof QueryFrame topQuery ? topQuery : currentQueryFrame();
         try {
-            if (queryCtx == null) {
+            if (qf == null) {
                 throw new IllegalStateException(
                         "No AuthorizedQueryScopeContext bound on current thread; authorizeAndResolveAccessScope must run before maskQueryResponseDtos");
             }
@@ -775,7 +1140,7 @@ public final class AuthzGovernedResourceServiceSupport {
                 return List.of();
             }
             List<DetachedDtoMaskingResult> maskedList = authorizationSeam.projectAndMaskQueryResults(
-                    queryCtx,
+                    qf.context(),
                     responses,
                     fieldSchemas
             );
@@ -785,26 +1150,48 @@ public final class AuthzGovernedResourceServiceSupport {
             }
             return List.copyOf(converted);
         } finally {
-            activeQueryContext.remove();
+            if (qf != null && stack.peekFirst() == qf) {
+                stack.pollFirst();
+                if (stack.isEmpty()) {
+                    frameStack.remove();
+                }
+            }
         }
     }
 
     /** Returns the currently bound {@link AuthorizedQueryScopeContext} on this thread, or {@code null}. */
     AuthorizedQueryScopeContext currentQueryScopeContext() {
-        return activeQueryContext.get();
+        QueryFrame qf = currentQueryFrame();
+        return qf == null ? null : qf.context();
     }
 
     /** Restores a previously resolved {@link AuthorizedQueryScopeContext} on the current thread ({@code P10.16-R02}). */
     void restoreQueryScopeContext(AuthorizedQueryScopeContext queryCtx) {
-        if (queryCtx != null) {
-            activeQueryContext.set(queryCtx);
-        }
+        restoreQueryScopeContext(null, queryCtx);
     }
 
-    /** Clears only the per-item mutation context while preserving {@code activeQueryContext} ({@code P10.16-R02}). */
+    /** Owner-aware variant ensuring {@code queryCtx} is on top of the LIFO frame stack. */
+    void restoreQueryScopeContext(Object owner, AuthorizedQueryScopeContext queryCtx) {
+        if (queryCtx == null) {
+            return;
+        }
+        Object normalizedOwner = normalizeOwner(owner);
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (stack.peekFirst() instanceof QueryFrame qf && qf.context() == queryCtx && qf.owner() == normalizedOwner) {
+            return;
+        }
+        stack.addFirst(new QueryFrame(normalizedOwner, queryCtx));
+    }
+
+    /** Clears only the per-item mutation context while preserving any underlying query scope frame ({@code P10.16-R02}). */
     void clearPerItemMutationContext() {
-        activeMutationContext.remove();
-        mutationReadyForResponseMasking.remove();
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (stack.peekFirst() instanceof MutationFrame) {
+            stack.pollFirst();
+            if (stack.isEmpty()) {
+                frameStack.remove();
+            }
+        }
     }
 
     /**
@@ -887,14 +1274,14 @@ public final class AuthzGovernedResourceServiceSupport {
         if (rawFactsNode == null || !rawFactsNode.isObject()) {
             return rawFactsNode;
         }
-        IntrospectedDtoGovernanceContract contract = explicitContract != null
-                ? explicitContract
-                : lastIntrospectedContract;
+        IntrospectedDtoGovernanceContract contract = resolveIntrospectedContract(explicitContract);
         if (contract == null) {
             return rawFactsNode;
         }
-        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
-        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+        MutationFrame mutationFrame = currentMutationFrame();
+        AuthorizedPreMutationContext preCtx = mutationFrame == null ? null : mutationFrame.context();
+        QueryFrame queryFrame = currentQueryFrame();
+        AuthorizedQueryScopeContext queryCtx = queryFrame == null ? null : queryFrame.context();
 
         Set<String> deniedAttributes = new LinkedHashSet<>();
         for (FieldUseEffectDirective dir : contract.baselineFieldUseDirectives()) {
@@ -959,25 +1346,22 @@ public final class AuthzGovernedResourceServiceSupport {
      * {@code AbstractBaseResourceService.bulkDomainAdapter.update(...)}) ({@code Fase P10.5}, {@code P19}).
      */
     void completePendingMutationOutboxIfNotDisclosed() {
-        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
-        if (preCtx != null && Boolean.TRUE.equals(mutationReadyForResponseMasking.get())) {
-            try {
-                authorizationSeam.completePostDeleteOutbox(preCtx);
-            } finally {
-                activeMutationContext.remove();
-                mutationReadyForResponseMasking.remove();
+        Deque<AuthorizationFrame> stack = frameStack.get();
+        if (stack.peekFirst() instanceof MutationFrame mf && mf.readyForMasking()) {
+            stack.pollFirst();
+            if (stack.isEmpty()) {
+                frameStack.remove();
             }
+            authorizationSeam.completePostDeleteOutbox(mf.context());
         }
     }
 
     /**
-     * Clears transient query/mutation contexts while preserving {@code activeExportMaskDirectives}
-     * and {@code pendingDeleteContexts} until transaction completion.
+     * Clears transient default-owner query/mutation contexts and extracted field uses while
+     * preserving outer service frames, export mask directives, and pending delete queues.
      */
     void clearTransientRequestContexts() {
-        activeQueryContext.remove();
-        activeMutationContext.remove();
-        mutationReadyForResponseMasking.remove();
+        popTopFramesForOwner(DEFAULT_OWNER);
         activeExtractedQueryFieldUses.remove();
     }
 
@@ -1051,17 +1435,15 @@ public final class AuthzGovernedResourceServiceSupport {
 
     /** Returns {@code true} if a pre-mutation context is currently bound on this thread. */
     public boolean hasActiveMutationContext() {
-        return activeMutationContext.get() != null;
+        return currentMutationFrame() != null;
     }
 
     /** Clears any thread-local query or mutation authorization context. */
     public void clearContext() {
-        activeQueryContext.remove();
-        activeMutationContext.remove();
-        mutationReadyForResponseMasking.remove();
-        activeExportMaskDirectives.remove();
-        activeExportValueDeniedAttributeIds.remove();
-        pendingDeleteContexts.remove();
+        frameStack.remove();
+        exportFrameStack.remove();
+        pendingDeleteContextsByOwner.remove();
         activeExtractedQueryFieldUses.remove();
+        currentThreadContract.remove();
     }
 }

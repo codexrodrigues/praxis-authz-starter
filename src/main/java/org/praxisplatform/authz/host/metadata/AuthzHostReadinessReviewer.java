@@ -775,14 +775,15 @@ public final class AuthzHostReadinessReviewer {
         }
         Set<String> restrictedAttrs = new LinkedHashSet<>();
         Set<String> queryRestrictedAttrs = new LinkedHashSet<>();
-        for (FieldUseEffectDirective dir : responseContract.baselineFieldUseDirectives()) {
-            if (dir.category() == FieldUseCategory.VALUE && dir.effect() == RuleEffect.DENY) {
-                restrictedAttrs.add(dir.attributeId());
-            } else if ((dir.category() == FieldUseCategory.FILTER || dir.category() == FieldUseCategory.SORT)
-                    && dir.effect() == RuleEffect.DENY) {
-                queryRestrictedAttrs.add(dir.attributeId());
-            }
-        }
+        IntrospectedDtoGovernanceContract filterContract = (filterDtoClass != null
+                && filterDtoClass != Object.class
+                && !Map.class.isAssignableFrom(filterDtoClass))
+                ? dtoIntrospector.introspectWriteDto(filterDtoClass, responseType, resourceKey)
+                : null;
+        collectRestrictedAttributes(responseContract, restrictedAttrs, queryRestrictedAttrs);
+        collectRestrictedAttributes(createContract, restrictedAttrs, queryRestrictedAttrs);
+        collectRestrictedAttributes(updateContract, restrictedAttrs, queryRestrictedAttrs);
+        collectRestrictedAttributes(filterContract, restrictedAttrs, queryRestrictedAttrs);
         queryRestrictedAttrs.removeAll(restrictedAttrs);
         if (filterDtoClass != null
                 && filterDtoClass != Object.class
@@ -1010,6 +1011,7 @@ public final class AuthzHostReadinessReviewer {
                     resourceKey,
                     serviceName,
                     entityClass,
+                    filterDtoClass,
                     rawStatsRegistry,
                     responseContract,
                     spec,
@@ -1569,12 +1571,14 @@ public final class AuthzHostReadinessReviewer {
             String resourceKey,
             String serviceName,
             Class<?> entityClass,
+            Class<?> filterDtoClass,
             StatsFieldRegistry rawStatsRegistry,
             IntrospectedDtoGovernanceContract responseContract,
             AuthzResourceGovernanceSpec<?> spec,
             Set<String> restrictedAttrs
     ) {
         boolean checkEntity = entityClass != null && entityClass != Object.class && !Map.class.isAssignableFrom(entityClass);
+        boolean checkFilterDto = filterDtoClass != null && filterDtoClass != Object.class && !Map.class.isAssignableFrom(filterDtoClass);
         for (StatsFieldDescriptor desc : rawStatsRegistry.descriptors()) {
             if (desc == null || desc.field() == null || desc.field().isBlank()) {
                 continue;
@@ -1623,7 +1627,10 @@ public final class AuthzHostReadinessReviewer {
             }
             if (resolvesToValueDeniedAttribute(field, responseContract, spec, restrictedAttrs)
                     || resolvesToValueDeniedAttribute(desc.keyPropertyPath(), responseContract, spec, restrictedAttrs)
-                    || resolvesToValueDeniedAttribute(desc.labelPropertyPath(), responseContract, spec, restrictedAttrs)) {
+                    || resolvesToValueDeniedAttribute(desc.labelPropertyPath(), responseContract, spec, restrictedAttrs)
+                    || (checkFilterDto && (isFilterDtoPropertyRestricted(filterDtoClass, field, responseContract, spec, restrictedAttrs)
+                            || isFilterDtoPropertyRestricted(filterDtoClass, desc.keyPropertyPath(), responseContract, spec, restrictedAttrs)
+                            || isFilterDtoPropertyRestricted(filterDtoClass, desc.labelPropertyPath(), responseContract, spec, restrictedAttrs)))) {
                 issues.add(new ReadinessIssue(
                         "AUTHZ-HOST-011-VALUE-DENIED-STATS-FIELD",
                         Severity.ERROR,
@@ -1720,6 +1727,27 @@ public final class AuthzHostReadinessReviewer {
             }
         }
         return false;
+    }
+
+    private static void collectRestrictedAttributes(
+            IntrospectedDtoGovernanceContract contract,
+            Set<String> restrictedAttrs,
+            Set<String> queryRestrictedAttrs
+    ) {
+        if (contract == null || contract.baselineFieldUseDirectives() == null) {
+            return;
+        }
+        for (FieldUseEffectDirective dir : contract.baselineFieldUseDirectives()) {
+            if (dir == null || dir.attributeId() == null) {
+                continue;
+            }
+            if (dir.category() == FieldUseCategory.VALUE && dir.effect() == RuleEffect.DENY) {
+                restrictedAttrs.add(dir.attributeId());
+            } else if ((dir.category() == FieldUseCategory.FILTER || dir.category() == FieldUseCategory.SORT)
+                    && dir.effect() == RuleEffect.DENY) {
+                queryRestrictedAttrs.add(dir.attributeId());
+            }
+        }
     }
 
     private void verifyDecisionPointInCoordinates(

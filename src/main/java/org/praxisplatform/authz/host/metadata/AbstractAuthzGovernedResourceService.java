@@ -724,16 +724,18 @@ public abstract class AbstractAuthzGovernedResourceService<
             Consumer<E> entityMutator
     ) {
         Objects.requireNonNull(entityMutator, "entityMutator is required");
-        try {
-            return executeVersionedMutation(id, precondition, entity -> {
-                authorizeItemCommandAtStep11(id, entity, actionOrOperationId, commandDto);
-                entityMutator.accept(entity);
-                serviceSupport.markPostMutationReadyForOutboxAndMasking();
-            });
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                return executeVersionedMutation(id, precondition, entity -> {
+                    authorizeItemCommandAtStep11(id, entity, actionOrOperationId, commandDto);
+                    entityMutator.accept(entity);
+                    serviceSupport.markPostMutationReadyForOutboxAndMasking();
+                });
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     /**
@@ -748,16 +750,18 @@ public abstract class AbstractAuthzGovernedResourceService<
             BiConsumer<E, E> previousAndCurrentMutator
     ) {
         Objects.requireNonNull(previousAndCurrentMutator, "previousAndCurrentMutator is required");
-        try {
-            return executeVersionedMutation(id, precondition, (previous, current) -> {
-                authorizeItemCommandAtStep11(id, current, actionOrOperationId, commandDto);
-                previousAndCurrentMutator.accept(previous, current);
-                serviceSupport.markPostMutationReadyForOutboxAndMasking();
-            });
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                return executeVersionedMutation(id, precondition, (previous, current) -> {
+                    authorizeItemCommandAtStep11(id, current, actionOrOperationId, commandDto);
+                    previousAndCurrentMutator.accept(previous, current);
+                    serviceSupport.markPostMutationReadyForOutboxAndMasking();
+                });
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     /**
@@ -772,17 +776,19 @@ public abstract class AbstractAuthzGovernedResourceService<
             Consumer<E> entityMutator
     ) {
         Objects.requireNonNull(entityMutator, "entityMutator is required");
-        try {
-            E existing = findEntityById(id);
-            authorizeItemCommandAtStep11(id, existing, actionOrOperationId, commandDto);
-            entityMutator.accept(existing);
-            E saved = getRepository().save(existing);
-            serviceSupport.markPostMutationReadyForOutboxAndMasking();
-            return enrichSingleResponse(getResourceMapper().toResponse(saved));
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                E existing = findEntityById(id);
+                authorizeItemCommandAtStep11(id, existing, actionOrOperationId, commandDto);
+                entityMutator.accept(existing);
+                E saved = getRepository().save(existing);
+                serviceSupport.markPostMutationReadyForOutboxAndMasking();
+                return enrichSingleResponse(getResourceMapper().toResponse(saved));
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     private void authorizeItemCommandAtStep11(
@@ -817,7 +823,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerCedente(existing),
                 isCallerCessionario(existing),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts)
+                resolveFactStatuses(mergedFacts),
+                this
         );
     }
 
@@ -862,40 +869,73 @@ public abstract class AbstractAuthzGovernedResourceService<
         if (targetIds == null || targetIds.isEmpty()) {
             return List.of();
         }
-        List<AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<ID>> outcomes =
-                new java.util.ArrayList<>(targetIds.size());
-        try {
-            // P10.16-R02: Resolve primary resource SEARCH scope once for the cohort (avoiding N+1 OPA SEARCH calls)
-            serviceSupport.ensureActiveQueryContext(this::resolveResourceFilterAccessScope);
-            var cohortQueryScope = serviceSupport.currentQueryScopeContext();
+        return serviceSupport.executeInReentrancyScope(() -> {
+            List<AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<ID>> outcomes =
+                    new java.util.ArrayList<>(targetIds.size());
+            try {
+                // P10.16-R02: Resolve primary resource SEARCH scope once for the cohort (avoiding N+1 OPA SEARCH calls)
+                serviceSupport.ensureActiveQueryContext(this, this::resolveResourceFilterAccessScope);
+                var cohortQueryScope = serviceSupport.currentQueryScopeContext();
 
-            // P10.16-R02: When the bulk action has its own SEARCH-capable DecisionPointDescriptor,
-            // evaluate its SEARCH DataScopePlan once for the cohort as well.
-            DecisionPointDescriptor effectiveActionDp = resolveOperationDecisionPoint(actionOrOperationId);
-            org.praxisplatform.authz.contracts.datascope.DataScopePlan actionDataScopePlan = null;
-            if (effectiveActionDp != null
-                    && effectiveActionDp != decisionPoint
-                    && effectiveActionDp.evaluationModes().contains(
-                            org.praxisplatform.authz.contracts.decisionpoint.EvaluationMode.SEARCH)) {
-                Map<String, Object> subjectFacts = resolveSubjectAndEnvironmentFacts();
-                var actionSearchScope = serviceSupport.evaluateBulkActionSearchScope(
-                        effectiveActionDp,
-                        resolveOperationFactContractDigest(effectiveActionDp),
-                        resolveRequestHeaderNames(),
-                        subjectFacts,
-                        resolveFactStatuses(subjectFacts),
-                        jpaDataScopeAdapter,
-                        resolveHardScopeJpql(),
-                        resolveHardScopeParams()
-                );
-                actionDataScopePlan = actionSearchScope.dataScopePlan();
-            }
+                // P10.16-R02: When the bulk action has its own SEARCH-capable DecisionPointDescriptor,
+                // evaluate its SEARCH DataScopePlan once for the cohort as well.
+                DecisionPointDescriptor effectiveActionDp = resolveOperationDecisionPoint(actionOrOperationId);
+                org.praxisplatform.authz.contracts.datascope.DataScopePlan actionDataScopePlan = null;
+                if (effectiveActionDp != null
+                        && effectiveActionDp != decisionPoint
+                        && effectiveActionDp.evaluationModes().contains(
+                                org.praxisplatform.authz.contracts.decisionpoint.EvaluationMode.SEARCH)) {
+                    Map<String, Object> subjectFacts = resolveSubjectAndEnvironmentFacts();
+                    var actionSearchScope = serviceSupport.evaluateBulkActionSearchScope(
+                            effectiveActionDp,
+                            resolveOperationFactContractDigest(effectiveActionDp),
+                            resolveRequestHeaderNames(),
+                            subjectFacts,
+                            resolveFactStatuses(subjectFacts),
+                            jpaDataScopeAdapter,
+                            resolveHardScopeJpql(),
+                            resolveHardScopeParams()
+                    );
+                    actionDataScopePlan = actionSearchScope.dataScopePlan();
+                }
 
-            if (batchMode == org.praxisplatform.authz.contracts.binding.BatchAuthorizationMode.REJECT_ALL) {
+                if (batchMode == org.praxisplatform.authz.contracts.binding.BatchAuthorizationMode.REJECT_ALL) {
+                    for (ID id : targetIds) {
+                        try {
+                            serviceSupport.restoreQueryScopeContext(this, cohortQueryScope);
+                            E existing = findEntityById(id);
+                            if (actionDataScopePlan != null && governanceSpec != null && callerContextProvider != null) {
+                                governanceSpec.verifyEntityAccessAllowed(
+                                        existing,
+                                        callerContextProvider.currentCallerContext(),
+                                        actionDataScopePlan
+                                );
+                            }
+                            authorizeItemCommandAtStep11(id, existing, actionOrOperationId, commandDto);
+                            E candidate = snapshotBeforeMutation(existing);
+                            entityMutator.accept(candidate);
+                            E saved = getRepository().save(candidate);
+                            serviceSupport.markPostMutationReadyForOutboxAndMasking();
+                            serviceSupport.completePendingMutationOutboxIfNotDisclosed();
+                            java.util.OptionalLong verOpt = getEntityResourceVersion(saved);
+                            String version = verOpt.isPresent() ? String.valueOf(verOpt.getAsLong()) : null;
+                            outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
+                                    id, true, version, "COMMITTED"
+                            ));
+                        } finally {
+                            serviceSupport.clearPerItemMutationContext();
+                            serviceSupport.restoreQueryScopeContext(this, cohortQueryScope);
+                        }
+                    }
+                    return List.copyOf(outcomes);
+                }
+
+                // PER_ITEM mode: isolate per-item authorization/validation failures without aborting the cohort
                 for (ID id : targetIds) {
+                    E existing = null;
                     try {
-                        serviceSupport.restoreQueryScopeContext(cohortQueryScope);
-                        E existing = findEntityById(id);
+                        serviceSupport.restoreQueryScopeContext(this, cohortQueryScope);
+                        existing = findEntityById(id);
                         if (actionDataScopePlan != null && governanceSpec != null && callerContextProvider != null) {
                             governanceSpec.verifyEntityAccessAllowed(
                                     existing,
@@ -904,6 +944,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                             );
                         }
                         authorizeItemCommandAtStep11(id, existing, actionOrOperationId, commandDto);
+                        // P10.16-R02: Mutate a detached snapshot candidate first so if entityMutator throws
+                        // after modifying fields, the managed entity in the JPA PersistenceContext is never dirtied.
                         E candidate = snapshotBeforeMutation(existing);
                         entityMutator.accept(candidate);
                         E saved = getRepository().save(candidate);
@@ -914,77 +956,42 @@ public abstract class AbstractAuthzGovernedResourceService<
                         outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
                                 id, true, version, "COMMITTED"
                         ));
+                    } catch (org.praxisplatform.authz.enforcement.writeintent.FieldWriteViolationException ex) {
+                        detachEntityIfManaged(existing);
+                        serviceSupport.clearPerItemMutationContext();
+                        outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
+                                id, false, null, "FIELD_WRITE_DENIED"
+                        ));
+                    } catch (SecurityException ex) {
+                        detachEntityIfManaged(existing);
+                        serviceSupport.clearPerItemMutationContext();
+                        outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
+                                id, false, null, "ACCESS_OR_SCOPE_DENIED"
+                        ));
+                    } catch (jakarta.persistence.EntityNotFoundException ex) {
+                        serviceSupport.clearPerItemMutationContext();
+                        outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
+                                id, false, null, "ENTITY_NOT_FOUND"
+                        ));
+                    } catch (RuntimeException ex) {
+                        // P10.16-R02: Detach managed entity when entityMutator or save fails so Hibernate
+                        // dirty checking never flushes an un-audited mutation when the cohort commits.
+                        detachEntityIfManaged(existing);
+                        serviceSupport.clearPerItemMutationContext();
+                        outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
+                                id, false, null, "DOMAIN_VALIDATION_REJECTED"
+                        ));
                     } finally {
                         serviceSupport.clearPerItemMutationContext();
-                        serviceSupport.restoreQueryScopeContext(cohortQueryScope);
+                        serviceSupport.restoreQueryScopeContext(this, cohortQueryScope);
                     }
                 }
                 return List.copyOf(outcomes);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
             }
-
-            // PER_ITEM mode: isolate per-item authorization/validation failures without aborting the cohort
-            for (ID id : targetIds) {
-                E existing = null;
-                try {
-                    serviceSupport.restoreQueryScopeContext(cohortQueryScope);
-                    existing = findEntityById(id);
-                    if (actionDataScopePlan != null && governanceSpec != null && callerContextProvider != null) {
-                        governanceSpec.verifyEntityAccessAllowed(
-                                existing,
-                                callerContextProvider.currentCallerContext(),
-                                actionDataScopePlan
-                        );
-                    }
-                    authorizeItemCommandAtStep11(id, existing, actionOrOperationId, commandDto);
-                    // P10.16-R02: Mutate a detached snapshot candidate first so if entityMutator throws
-                    // after modifying fields, the managed entity in the JPA PersistenceContext is never dirtied.
-                    E candidate = snapshotBeforeMutation(existing);
-                    entityMutator.accept(candidate);
-                    E saved = getRepository().save(candidate);
-                    serviceSupport.markPostMutationReadyForOutboxAndMasking();
-                    serviceSupport.completePendingMutationOutboxIfNotDisclosed();
-                    java.util.OptionalLong verOpt = getEntityResourceVersion(saved);
-                    String version = verOpt.isPresent() ? String.valueOf(verOpt.getAsLong()) : null;
-                    outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
-                            id, true, version, "COMMITTED"
-                    ));
-                } catch (org.praxisplatform.authz.enforcement.writeintent.FieldWriteViolationException ex) {
-                    detachEntityIfManaged(existing);
-                    serviceSupport.clearPerItemMutationContext();
-                    outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
-                            id, false, null, "FIELD_WRITE_DENIED"
-                    ));
-                } catch (SecurityException ex) {
-                    detachEntityIfManaged(existing);
-                    serviceSupport.clearPerItemMutationContext();
-                    outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
-                            id, false, null, "ACCESS_OR_SCOPE_DENIED"
-                    ));
-                } catch (jakarta.persistence.EntityNotFoundException ex) {
-                    serviceSupport.clearPerItemMutationContext();
-                    outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
-                            id, false, null, "ENTITY_NOT_FOUND"
-                    ));
-                } catch (RuntimeException ex) {
-                    // P10.16-R02: Detach managed entity when entityMutator or save fails so Hibernate
-                    // dirty checking never flushes an un-audited mutation when the cohort commits.
-                    detachEntityIfManaged(existing);
-                    serviceSupport.clearPerItemMutationContext();
-                    outcomes.add(new AuthzGovernedBulkDomainResourceAdapter.BulkCohortItemOutcome<>(
-                            id, false, null, "DOMAIN_VALIDATION_REJECTED"
-                    ));
-                } finally {
-                    serviceSupport.clearPerItemMutationContext();
-                    serviceSupport.restoreQueryScopeContext(cohortQueryScope);
-                }
-            }
-            return List.copyOf(outcomes);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -1159,38 +1166,39 @@ public abstract class AbstractAuthzGovernedResourceService<
             Function<E, Object> rawDeterminationEvaluator
     ) {
         Objects.requireNonNull(rawDeterminationEvaluator, "rawDeterminationEvaluator is required");
-        try {
-            E entity = findEntityById(id);
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
-            Set<String> primaryValueDenied = Set.of();
-            List<MaskDirective> primaryMasks = List.of();
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                var primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                E entity = findEntityById(id);
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
+                Set<String> primaryValueDenied = Set.of();
+                List<MaskDirective> primaryMasks = List.of();
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    var primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            resolveFactStatuses(mergedFacts)
+                    );
+                    primaryValueDenied = primaryEval.valueDeniedAttributeIds();
+                    primaryMasks = primaryEval.maskDirectives();
+                }
+                return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
+                        effectiveDp,
+                        resolveOperationFactContractDigest(effectiveDp),
                         mergedFacts,
-                        resolveFactStatuses(mergedFacts)
+                        resolveFactStatuses(mergedFacts),
+                        () -> rawDeterminationEvaluator.apply(entity),
+                        primaryValueDenied,
+                        primaryMasks
                 );
-                primaryValueDenied = primaryEval.valueDeniedAttributeIds();
-                primaryMasks = primaryEval.maskDirectives();
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
-                    effectiveDp,
-                    resolveOperationFactContractDigest(effectiveDp),
-                    mergedFacts,
-                    resolveFactStatuses(mergedFacts),
-                    () -> rawDeterminationEvaluator.apply(entity),
-                    primaryValueDenied,
-                    primaryMasks
-            );
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -1216,40 +1224,41 @@ public abstract class AbstractAuthzGovernedResourceService<
             Supplier<Object> rawDeterminationEvaluator
     ) {
         Objects.requireNonNull(rawDeterminationEvaluator, "rawDeterminationEvaluator is required");
-        try {
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(candidateEntity);
-            if (candidateEntity != null) {
-                assertEntityAccessAllowed(candidateEntity);
-            }
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
-            Set<String> primaryValueDenied = Set.of();
-            List<MaskDirective> primaryMasks = List.of();
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                var primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(candidateEntity);
+                if (candidateEntity != null) {
+                    assertEntityAccessAllowed(candidateEntity);
+                }
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
+                Set<String> primaryValueDenied = Set.of();
+                List<MaskDirective> primaryMasks = List.of();
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    var primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            resolveFactStatuses(mergedFacts)
+                    );
+                    primaryValueDenied = primaryEval.valueDeniedAttributeIds();
+                    primaryMasks = primaryEval.maskDirectives();
+                }
+                return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
+                        effectiveDp,
+                        resolveOperationFactContractDigest(effectiveDp),
                         mergedFacts,
-                        resolveFactStatuses(mergedFacts)
+                        resolveFactStatuses(mergedFacts),
+                        rawDeterminationEvaluator,
+                        primaryValueDenied,
+                        primaryMasks
                 );
-                primaryValueDenied = primaryEval.valueDeniedAttributeIds();
-                primaryMasks = primaryEval.maskDirectives();
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
-                    effectiveDp,
-                    resolveOperationFactContractDigest(effectiveDp),
-                    mergedFacts,
-                    resolveFactStatuses(mergedFacts),
-                    rawDeterminationEvaluator,
-                    primaryValueDenied,
-                    primaryMasks
-            );
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -1259,41 +1268,42 @@ public abstract class AbstractAuthzGovernedResourceService<
      * {@code LGPD_SENSITIVE_DATA} attributes ({@code Fase P10.11}, {@code P47}, {@code P57}, {@code P62}).
      */
     public final SanitizedAiToolProjection projectGovernedItemAiContext(ID id) {
-        try {
-            E entity = findEntityById(id);
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
-            ResponseDTO rawDto = getRawResourceMapper().toResponse(entity);
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint("ai-context");
-            Set<String> primaryValueDenied = Set.of();
-            List<MaskDirective> primaryMasks = List.of();
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                var primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                E entity = findEntityById(id);
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
+                ResponseDTO rawDto = getRawResourceMapper().toResponse(entity);
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint("ai-context");
+                Set<String> primaryValueDenied = Set.of();
+                List<MaskDirective> primaryMasks = List.of();
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    var primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            resolveFactStatuses(mergedFacts)
+                    );
+                    primaryValueDenied = primaryEval.valueDeniedAttributeIds();
+                    primaryMasks = primaryEval.maskDirectives();
+                }
+                return getGovernedReactiveDeterminationProvider().projectGovernedAiContext(
+                        effectiveDp,
+                        resolveOperationFactContractDigest(effectiveDp),
+                        null,
+                        null,
+                        rawDto != null ? rawDto : entity,
                         mergedFacts,
-                        resolveFactStatuses(mergedFacts)
+                        resolveFactStatuses(mergedFacts),
+                        primaryValueDenied,
+                        primaryMasks
                 );
-                primaryValueDenied = primaryEval.valueDeniedAttributeIds();
-                primaryMasks = primaryEval.maskDirectives();
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            return getGovernedReactiveDeterminationProvider().projectGovernedAiContext(
-                    effectiveDp,
-                    resolveOperationFactContractDigest(effectiveDp),
-                    null,
-                    null,
-                    rawDto != null ? rawDto : entity,
-                    mergedFacts,
-                    resolveFactStatuses(mergedFacts),
-                    primaryValueDenied,
-                    primaryMasks
-            );
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -1342,54 +1352,55 @@ public abstract class AbstractAuthzGovernedResourceService<
     ) {
         Objects.requireNonNull(rawDraftBuilder, "rawDraftBuilder is required");
         String effectiveOpId = (operationId == null || operationId.isBlank()) ? "duplicate-draft" : operationId;
-        try {
-            E sourceEntity = findEntityById(sourceId);
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(sourceEntity);
-            Map<String, FactResolutionStatus> statuses = resolveFactStatuses(mergedFacts);
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(effectiveOpId);
-            TargetReadProjectionEvaluation targetEval;
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                TargetReadProjectionEvaluation primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
-                        mergedFacts,
-                        statuses
-                );
-                TargetReadProjectionEvaluation secondaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        effectiveDp,
-                        resolveOperationFactContractDigest(effectiveDp),
-                        mergedFacts,
-                        statuses
-                );
-                targetEval = primaryEval.mergeWith(secondaryEval);
-            } else {
-                DecisionPointDescriptor dp = effectiveDp != null ? effectiveDp : decisionPoint;
-                targetEval = serviceSupport.authorizeTargetEntityProjection(
-                        dp,
-                        resolveOperationFactContractDigest(dp),
-                        mergedFacts,
-                        statuses
-                );
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                E sourceEntity = findEntityById(sourceId);
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(sourceEntity);
+                Map<String, FactResolutionStatus> statuses = resolveFactStatuses(mergedFacts);
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(effectiveOpId);
+                TargetReadProjectionEvaluation targetEval;
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    TargetReadProjectionEvaluation primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            statuses
+                    );
+                    TargetReadProjectionEvaluation secondaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            effectiveDp,
+                            resolveOperationFactContractDigest(effectiveDp),
+                            mergedFacts,
+                            statuses
+                    );
+                    targetEval = primaryEval.mergeWith(secondaryEval);
+                } else {
+                    DecisionPointDescriptor dp = effectiveDp != null ? effectiveDp : decisionPoint;
+                    targetEval = serviceSupport.authorizeTargetEntityProjection(
+                            dp,
+                            resolveOperationFactContractDigest(dp),
+                            mergedFacts,
+                            statuses
+                    );
+                }
+                DualScopeDelegationSpec dualScope = resolveDualScopeDelegationSpec();
+                boolean callerCedente = isCallerCedente(sourceEntity);
+                boolean callerCessionario = isCallerCessionario(sourceEntity);
+                if (dualScope != null && !callerCedente && !callerCessionario) {
+                    throw new SecurityException("AUTHZ_DUPLICATE_DRAFT_CUSTODY_DENIED: Caller holds neither Cedente nor Cessionário custody on source record '"
+                            + sourceId + "'");
+                }
+                DraftDTO rawDraft = rawDraftBuilder.apply(sourceEntity);
+                if (rawDraft == null) {
+                    return null;
+                }
+                return sanitizeDuplicateDraftPayload(rawDraft, targetEval, dualScope, callerCedente, callerCessionario);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            DualScopeDelegationSpec dualScope = resolveDualScopeDelegationSpec();
-            boolean callerCedente = isCallerCedente(sourceEntity);
-            boolean callerCessionario = isCallerCessionario(sourceEntity);
-            if (dualScope != null && !callerCedente && !callerCessionario) {
-                throw new SecurityException("AUTHZ_DUPLICATE_DRAFT_CUSTODY_DENIED: Caller holds neither Cedente nor Cessionário custody on source record '"
-                        + sourceId + "'");
-            }
-            DraftDTO rawDraft = rawDraftBuilder.apply(sourceEntity);
-            if (rawDraft == null) {
-                return null;
-            }
-            return sanitizeDuplicateDraftPayload(rawDraft, targetEval, dualScope, callerCedente, callerCessionario);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     @SuppressWarnings("unchecked")
@@ -1508,6 +1519,27 @@ public abstract class AbstractAuthzGovernedResourceService<
         return (DraftDTO) mapper.convertValue(sanitized, rawDraft.getClass());
     }
 
+    /**
+     * Opt-in hook enabling per-record contextual {@code TARGET} masking during read projections
+     * ({@code P12}). Disabled by default to preserve {@code P10.4-R03} zero N+1 query guarantees.
+     */
+    protected boolean requiresRecordContextualSearchMasking() {
+        return false;
+    }
+
+    private TargetReadProjectionEvaluation resolveContextualSearchTargetProjection(E entity) {
+        if (!requiresRecordContextualSearchMasking() || entity == null) {
+            return null;
+        }
+        Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
+        return serviceSupport.authorizeTargetEntityProjection(
+                decisionPoint,
+                factContractDigest,
+                mergedFacts,
+                resolveFactStatuses(mergedFacts)
+        );
+    }
+
     @Override
     protected final ResourceMapper<E, ResponseDTO, CreateDTO, UpdateDTO, ID> getResourceMapper() {
         ResourceMapper<E, ResponseDTO, CreateDTO, UpdateDTO, ID> current = this.wrappedMapper;
@@ -1517,7 +1549,12 @@ public abstract class AbstractAuthzGovernedResourceService<
                 if (current == null) {
                     ResourceMapper<E, ResponseDTO, CreateDTO, UpdateDTO, ID> raw = Objects.requireNonNull(
                             getRawResourceMapper(), "getRawResourceMapper() must not return null");
-                    current = serviceSupport.wrapResourceMapper(raw, responseType, resolveResourceKey());
+                    current = serviceSupport.wrapResourceMapper(
+                            raw,
+                            responseType,
+                            resolveResourceKey(),
+                            this::resolveContextualSearchTargetProjection
+                    );
                     this.wrappedMapper = current;
                 }
             }
@@ -1545,7 +1582,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 resolveHardScopeJpql(),
                 resolveHardScopeParams(),
                 criteriaTranslator,
-                resolveHardScope()
+                resolveHardScope(),
+                this
         );
     }
 
@@ -1554,22 +1592,24 @@ public abstract class AbstractAuthzGovernedResourceService<
         if (entity == null) {
             return;
         }
-        serviceSupport.ensureActiveQueryContext(this::resolveResourceFilterAccessScope);
+        serviceSupport.ensureActiveQueryContext(this, this::resolveResourceFilterAccessScope);
         try {
             verifyEntityAccessAllowed(entity);
         } catch (RuntimeException | Error ex) {
-            serviceSupport.completeBatchEnrichResponses();
+            serviceSupport.completeBatchEnrichResponses(this);
             throw ex;
         }
     }
 
     @Override
     public final void assertItemAccessible(ID id) {
-        try {
-            super.assertItemAccessible(id);
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-        }
+        serviceSupport.executeInReentrancyScopeVoid(() -> {
+            try {
+                super.assertItemAccessible(id);
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
+            }
+        });
     }
 
     @Override
@@ -1577,7 +1617,7 @@ public abstract class AbstractAuthzGovernedResourceService<
         try {
             super.enrichResponses(responses);
         } finally {
-            serviceSupport.completeBatchEnrichResponses();
+            serviceSupport.completeBatchEnrichResponses(this);
         }
     }
 
@@ -1594,10 +1634,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.filter(filterDto, pageable, includeIds)
-        );
+        ));
     }
 
     @Override
@@ -1607,10 +1647,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.exportCollection(request)
-        );
+        ));
     }
 
     @Override
@@ -1621,10 +1661,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.filterByCursor(filter, sort, after, before, size)
-        );
+        ));
     }
 
     @Override
@@ -1635,14 +1675,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.locate(filter, sort, id)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.locate(filter, sort, id)
+        ));
     }
 
     @Override
@@ -1653,23 +1689,15 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.filterOptions(filter, pageable)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.filterOptions(filter, pageable)
+        ));
     }
 
     @Override
     public List<OptionDTO<ID>> byIdsOptions(Collection<ID> ids) {
-        try {
-            return super.byIdsOptions(ids);
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> super.byIdsOptions(ids));
     }
 
     @Override
@@ -1685,14 +1713,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.filterOptionSourceOptions(sourceKey, request, pageable, providerFilterPayload)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.filterOptionSourceOptions(sourceKey, request, pageable, providerFilterPayload)
+        ));
     }
 
     @Override
@@ -1707,14 +1731,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.byIdsOptionSourceOptions(sourceKey, request, providerFilterPayload)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.byIdsOptionSourceOptions(sourceKey, request, providerFilterPayload)
+        ));
     }
 
     @Override
@@ -1725,10 +1745,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.groupByStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1739,10 +1759,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.timeSeriesStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1753,10 +1773,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.distributionStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1767,10 +1787,10 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.comparisonStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1781,34 +1801,34 @@ public abstract class AbstractAuthzGovernedResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.selectBulkIdentities(filter, included, excluded, maxTargets)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.selectBulkIdentities(filter, included, excluded, maxTargets)
+        ));
     }
 
     @Override
     public BaseResourceCommandService.SavedResult<ID, ResponseDTO> create(CreateDTO dto) {
-        try {
-            return super.create(dto);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                return super.create(dto);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     @Override
     public ResponseDTO update(ID id, UpdateDTO dto) {
-        try {
-            return super.update(id, dto);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                return super.update(id, dto);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     @Override
@@ -1817,32 +1837,38 @@ public abstract class AbstractAuthzGovernedResourceService<
             UpdateDTO dto,
             ResourceVersionUpdatePrecondition<ID> precondition
     ) {
-        try {
-            return super.update(id, dto, precondition);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                return super.update(id, dto, precondition);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     @Override
     public void deleteById(ID id) {
-        try {
-            super.deleteById(id);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        serviceSupport.executeInReentrancyScopeVoid(() -> {
+            try {
+                super.deleteById(id);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     @Override
     public void deleteAllById(Collection<ID> ids) {
-        try {
-            super.deleteAllById(ids);
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        }
+        serviceSupport.executeInReentrancyScopeVoid(() -> {
+            try {
+                super.deleteAllById(ids);
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            }
+        });
     }
 
     @Override
@@ -1863,7 +1889,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerCedente(entity),
                 isCallerCessionario(entity),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts)
+                resolveFactStatuses(mergedFacts),
+                this
         );
         hydrateBeforeCreate(dto, entity);
     }
@@ -1892,7 +1919,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerCedente(existing),
                 isCallerCessionario(existing),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts)
+                resolveFactStatuses(mergedFacts),
+                this
         );
         hydrateBeforeUpdate(id, existing, dto);
     }
@@ -1913,14 +1941,15 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerCedente(entity),
                 isCallerCessionario(entity),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts)
+                resolveFactStatuses(mergedFacts),
+                this
         );
         onBeforeDelete(id, entity);
     }
 
     @Override
     protected void afterDelete(ID id, E entity) {
-        serviceSupport.completeAfterDeleteOutbox();
+        serviceSupport.completeAfterDeleteOutbox(this);
         onAfterDelete(id, entity);
     }
 

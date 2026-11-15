@@ -193,9 +193,26 @@ public class PraxisAuthzHostBridgeAutoConfiguration {
         @ConditionalOnBean(AuthzCallerContextHttpResolver.class)
         public AuthzCallerContextFilter authzCallerContextFilter(
                 AuthzCallerContextHttpResolver resolver,
-                ThreadLocalAuthzCallerContextProvider callerContextProvider
+                ThreadLocalAuthzCallerContextProvider callerContextProvider,
+                org.springframework.beans.factory.ObjectProvider<org.praxisplatform.authz.host.metadata.PraxisAuthzExceptionHandler> exceptionHandlerProvider,
+                org.springframework.beans.factory.ObjectProvider<com.fasterxml.jackson.databind.ObjectMapper> objectMapperProvider
         ) {
-            return new AuthzCallerContextFilter(resolver, callerContextProvider);
+            return new AuthzCallerContextFilter(
+                    resolver,
+                    callerContextProvider,
+                    exceptionHandlerProvider.getIfAvailable(),
+                    objectMapperProvider.getIfAvailable()
+            );
+        }
+
+        @Bean
+        @ConditionalOnMissingBean
+        @ConditionalOnClass(name = {
+                "org.springframework.web.bind.annotation.RestControllerAdvice",
+                "org.praxisplatform.uischema.rest.response.RestApiResponse"
+        })
+        public org.praxisplatform.authz.host.metadata.PraxisAuthzExceptionHandler praxisAuthzExceptionHandler() {
+            return new org.praxisplatform.authz.host.metadata.PraxisAuthzExceptionHandler();
         }
 
         @Bean

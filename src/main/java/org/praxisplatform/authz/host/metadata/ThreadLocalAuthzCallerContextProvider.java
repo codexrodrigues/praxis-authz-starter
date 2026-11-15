@@ -16,8 +16,10 @@ public final class ThreadLocalAuthzCallerContextProvider implements AuthzCallerC
     public AuthzCallerContext currentCallerContext() {
         AuthzCallerContext current = contextHolder.get();
         if (current == null) {
-            throw new SecurityException(
-                    "AUTHZ_CALLER_CONTEXT_MISSING: No AuthzCallerContext bound on current thread (fail-closed P01/P02)");
+            throw new AuthzUnauthenticatedException(
+                    "AUTHZ_CALLER_CONTEXT_MISSING",
+                    "AUTHZ_CALLER_CONTEXT_MISSING: No AuthzCallerContext bound on current thread (fail-closed P01/P02)"
+            );
         }
         return current;
     }

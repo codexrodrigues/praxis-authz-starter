@@ -22,6 +22,7 @@ import org.praxisplatform.authz.enforcement.jpa.JpaDataScopeAdapter;
 import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.AiGovernanceMetadataView;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.SanitizedAiToolProjection;
+import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.TargetReadProjectionEvaluation;
 import org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry;
 import org.praxisplatform.uischema.capability.ResourceStateSnapshot;
 import org.praxisplatform.uischema.capability.ResourceStateSnapshotProvider;
@@ -676,38 +677,39 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
             Function<E, Object> rawDeterminationEvaluator
     ) {
         Objects.requireNonNull(rawDeterminationEvaluator, "rawDeterminationEvaluator is required");
-        try {
-            E entity = findEntityById(id);
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
-            Set<String> primaryValueDenied = Set.of();
-            List<MaskDirective> primaryMasks = List.of();
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                var primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                E entity = findEntityById(id);
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
+                Set<String> primaryValueDenied = Set.of();
+                List<MaskDirective> primaryMasks = List.of();
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    var primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            resolveFactStatuses(mergedFacts)
+                    );
+                    primaryValueDenied = primaryEval.valueDeniedAttributeIds();
+                    primaryMasks = primaryEval.maskDirectives();
+                }
+                return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
+                        effectiveDp,
+                        resolveOperationFactContractDigest(effectiveDp),
                         mergedFacts,
-                        resolveFactStatuses(mergedFacts)
+                        resolveFactStatuses(mergedFacts),
+                        () -> rawDeterminationEvaluator.apply(entity),
+                        primaryValueDenied,
+                        primaryMasks
                 );
-                primaryValueDenied = primaryEval.valueDeniedAttributeIds();
-                primaryMasks = primaryEval.maskDirectives();
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
-                    effectiveDp,
-                    resolveOperationFactContractDigest(effectiveDp),
-                    mergedFacts,
-                    resolveFactStatuses(mergedFacts),
-                    () -> rawDeterminationEvaluator.apply(entity),
-                    primaryValueDenied,
-                    primaryMasks
-            );
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -733,40 +735,41 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
             Supplier<Object> rawDeterminationEvaluator
     ) {
         Objects.requireNonNull(rawDeterminationEvaluator, "rawDeterminationEvaluator is required");
-        try {
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(candidateEntity);
-            if (candidateEntity != null) {
-                assertEntityAccessAllowed(candidateEntity);
-            }
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
-            Set<String> primaryValueDenied = Set.of();
-            List<MaskDirective> primaryMasks = List.of();
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                var primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(candidateEntity);
+                if (candidateEntity != null) {
+                    assertEntityAccessAllowed(candidateEntity);
+                }
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(determinationId);
+                Set<String> primaryValueDenied = Set.of();
+                List<MaskDirective> primaryMasks = List.of();
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    var primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            resolveFactStatuses(mergedFacts)
+                    );
+                    primaryValueDenied = primaryEval.valueDeniedAttributeIds();
+                    primaryMasks = primaryEval.maskDirectives();
+                }
+                return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
+                        effectiveDp,
+                        resolveOperationFactContractDigest(effectiveDp),
                         mergedFacts,
-                        resolveFactStatuses(mergedFacts)
+                        resolveFactStatuses(mergedFacts),
+                        rawDeterminationEvaluator,
+                        primaryValueDenied,
+                        primaryMasks
                 );
-                primaryValueDenied = primaryEval.valueDeniedAttributeIds();
-                primaryMasks = primaryEval.maskDirectives();
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            return getGovernedReactiveDeterminationProvider().evaluateGovernedDetermination(
-                    effectiveDp,
-                    resolveOperationFactContractDigest(effectiveDp),
-                    mergedFacts,
-                    resolveFactStatuses(mergedFacts),
-                    rawDeterminationEvaluator,
-                    primaryValueDenied,
-                    primaryMasks
-            );
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -776,41 +779,42 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
      * {@code LGPD_SENSITIVE_DATA} attributes ({@code Fase P10.11}, {@code P47}, {@code P57}, {@code P62}).
      */
     public final SanitizedAiToolProjection projectGovernedItemAiContext(ID id) {
-        try {
-            E entity = findEntityById(id);
-            Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
-            ResponseDTO rawDto = getRawResourceMapper().toResponse(entity);
-            DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint("ai-context");
-            Set<String> primaryValueDenied = Set.of();
-            List<MaskDirective> primaryMasks = List.of();
-            if (effectiveDp != null && effectiveDp != decisionPoint) {
-                var primaryEval = serviceSupport.authorizeTargetEntityProjection(
-                        decisionPoint,
-                        factContractDigest,
+        return serviceSupport.executeInReentrancyScope(() -> {
+            try {
+                E entity = findEntityById(id);
+                Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
+                ResponseDTO rawDto = getRawResourceMapper().toResponse(entity);
+                DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint("ai-context");
+                Set<String> primaryValueDenied = Set.of();
+                List<MaskDirective> primaryMasks = List.of();
+                if (effectiveDp != null && effectiveDp != decisionPoint) {
+                    var primaryEval = serviceSupport.authorizeTargetEntityProjection(
+                            decisionPoint,
+                            factContractDigest,
+                            mergedFacts,
+                            resolveFactStatuses(mergedFacts)
+                    );
+                    primaryValueDenied = primaryEval.valueDeniedAttributeIds();
+                    primaryMasks = primaryEval.maskDirectives();
+                }
+                return getGovernedReactiveDeterminationProvider().projectGovernedAiContext(
+                        effectiveDp,
+                        resolveOperationFactContractDigest(effectiveDp),
+                        null,
+                        null,
+                        rawDto != null ? rawDto : entity,
                         mergedFacts,
-                        resolveFactStatuses(mergedFacts)
+                        resolveFactStatuses(mergedFacts),
+                        primaryValueDenied,
+                        primaryMasks
                 );
-                primaryValueDenied = primaryEval.valueDeniedAttributeIds();
-                primaryMasks = primaryEval.maskDirectives();
+            } catch (RuntimeException | Error ex) {
+                serviceSupport.clearMutationAndQueryContextsOnFailure(this);
+                throw ex;
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
             }
-            return getGovernedReactiveDeterminationProvider().projectGovernedAiContext(
-                    effectiveDp,
-                    resolveOperationFactContractDigest(effectiveDp),
-                    null,
-                    null,
-                    rawDto != null ? rawDto : entity,
-                    mergedFacts,
-                    resolveFactStatuses(mergedFacts),
-                    primaryValueDenied,
-                    primaryMasks
-            );
-        } catch (RuntimeException | Error ex) {
-            serviceSupport.clearMutationAndQueryContextsOnFailure();
-            throw ex;
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-            serviceSupport.clearTransientRequestContexts();
-        }
+        });
     }
 
     /**
@@ -844,6 +848,27 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
         return Map.copyOf(merged);
     }
 
+    /**
+     * Opt-in hook enabling per-record contextual {@code TARGET} masking during read projections
+     * ({@code P12}). Disabled by default to preserve {@code P10.4-R03} zero N+1 query guarantees.
+     */
+    protected boolean requiresRecordContextualSearchMasking() {
+        return false;
+    }
+
+    private TargetReadProjectionEvaluation resolveContextualSearchTargetProjection(E entity) {
+        if (!requiresRecordContextualSearchMasking() || entity == null) {
+            return null;
+        }
+        Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(entity);
+        return serviceSupport.authorizeTargetEntityProjection(
+                decisionPoint,
+                factContractDigest,
+                mergedFacts,
+                resolveFactStatuses(mergedFacts)
+        );
+    }
+
     @Override
     protected final ResourceMapper<E, ResponseDTO, ?, ?, ID> getResourceMapper() {
         ResourceMapper<E, ResponseDTO, ?, ?, ID> current = this.wrappedMapper;
@@ -855,7 +880,12 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                     ResourceMapper<E, ResponseDTO, Object, Object, ID> raw =
                             (ResourceMapper<E, ResponseDTO, Object, Object, ID>) Objects.requireNonNull(
                                     getRawResourceMapper(), "getRawResourceMapper() must not return null");
-                    current = serviceSupport.wrapResourceMapper(raw, responseType, resolveResourceKey());
+                    current = serviceSupport.wrapResourceMapper(
+                            raw,
+                            responseType,
+                            resolveResourceKey(),
+                            this::resolveContextualSearchTargetProjection
+                    );
                     this.wrappedMapper = current;
                 }
             }
@@ -878,7 +908,8 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 resolveHardScopeJpql(),
                 resolveHardScopeParams(),
                 criteriaTranslator,
-                resolveHardScope()
+                resolveHardScope(),
+                this
         );
     }
 
@@ -887,22 +918,24 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
         if (entity == null) {
             return;
         }
-        serviceSupport.ensureActiveQueryContext(this::resolveResourceFilterAccessScope);
+        serviceSupport.ensureActiveQueryContext(this, this::resolveResourceFilterAccessScope);
         try {
             verifyEntityAccessAllowed(entity);
         } catch (RuntimeException | Error ex) {
-            serviceSupport.completeBatchEnrichResponses();
+            serviceSupport.completeBatchEnrichResponses(this);
             throw ex;
         }
     }
 
     @Override
     public final void assertItemAccessible(ID id) {
-        try {
-            super.assertItemAccessible(id);
-        } finally {
-            serviceSupport.completeBatchEnrichResponses();
-        }
+        serviceSupport.executeInReentrancyScopeVoid(() -> {
+            try {
+                super.assertItemAccessible(id);
+            } finally {
+                serviceSupport.completeBatchEnrichResponses(this);
+            }
+        });
     }
 
     @Override
@@ -910,7 +943,7 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
         try {
             super.enrichResponses(responses);
         } finally {
-            serviceSupport.completeBatchEnrichResponses();
+            serviceSupport.completeBatchEnrichResponses(this);
         }
     }
 
@@ -927,10 +960,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.filter(filterDto, pageable, includeIds)
-        );
+        ));
     }
 
     @Override
@@ -940,10 +973,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.exportCollection(request)
-        );
+        ));
     }
 
     @Override
@@ -954,10 +987,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.filterByCursor(filter, sort, after, before, size)
-        );
+        ));
     }
 
     @Override
@@ -968,14 +1001,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.locate(filter, sort, id)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.locate(filter, sort, id)
+        ));
     }
 
     @Override
@@ -986,23 +1015,15 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.filterOptions(filter, pageable)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.filterOptions(filter, pageable)
+        ));
     }
 
     @Override
     public List<OptionDTO<ID>> byIdsOptions(Collection<ID> ids) {
-        try {
-            return super.byIdsOptions(ids);
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> super.byIdsOptions(ids));
     }
 
     @Override
@@ -1018,14 +1039,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.filterOptionSourceOptions(sourceKey, request, pageable, providerFilterPayload)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.filterOptionSourceOptions(sourceKey, request, pageable, providerFilterPayload)
+        ));
     }
 
     @Override
@@ -1040,14 +1057,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        try {
-            return serviceSupport.executeWithExtractedQueryFieldUses(
-                    extractedUses,
-                    () -> super.byIdsOptionSourceOptions(sourceKey, request, providerFilterPayload)
-            );
-        } finally {
-            serviceSupport.clearTransientRequestContexts();
-        }
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
+                extractedUses,
+                () -> super.byIdsOptionSourceOptions(sourceKey, request, providerFilterPayload)
+        ));
     }
 
     @Override
@@ -1058,10 +1071,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.groupByStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1072,10 +1085,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.timeSeriesStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1086,10 +1099,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.distributionStats(request)
-        );
+        ));
     }
 
     @Override
@@ -1100,10 +1113,10 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 getGovernanceContract(),
                 governanceSpec
         );
-        return serviceSupport.executeWithExtractedQueryFieldUses(
+        return serviceSupport.executeInReentrancyScope(() -> serviceSupport.executeWithExtractedQueryFieldUses(
                 extractedUses,
                 () -> super.comparisonStats(request)
-        );
+        ));
     }
 
     @Override

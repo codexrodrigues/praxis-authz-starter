@@ -146,11 +146,12 @@ public final class JpaCriteriaDataScopeTranslator {
 
         if (node instanceof NullabilityPredicateIr nullPred) {
             QueryAdapterFieldBinding binding = requireBinding(nullPred.fieldPath());
-            boolean checkIsNull = (nullPred.operator() == SearchPredicateOperator.IS_NULL) ^ negated;
             if (binding.traversalStrategy() == RelationTraversalStrategy.CORRELATED_EXISTS_SUBQUERY) {
+                boolean innerIsNull = (nullPred.operator() == SearchPredicateOperator.IS_NULL);
                 return buildCorrelatedCollectionSubquery(binding, root, query, cb,
-                        targetPath -> checkIsNull ? cb.isNull(targetPath) : cb.isNotNull(targetPath), false);
+                        targetPath -> innerIsNull ? cb.isNull(targetPath) : cb.isNotNull(targetPath), negated);
             }
+            boolean checkIsNull = (nullPred.operator() == SearchPredicateOperator.IS_NULL) ^ negated;
             Path<?> path = resolveScalarPath(root, binding.nativeJpaPath());
             return checkIsNull ? cb.isNull(path) : cb.isNotNull(path);
         }
@@ -249,10 +250,13 @@ public final class JpaCriteriaDataScopeTranslator {
                             ? cb.lessThanOrEqualTo((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField)
                             : cb.greaterThan((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField);
                 }
-                Comparable val = (Comparable) ((LiteralOperandIr) comp.rightOperand()).value();
+                Comparable val = (Comparable) normalizeScalarValue(
+                        ((LiteralOperandIr) comp.rightOperand()).value(),
+                        comp.caseInsensitive()
+                );
                 yield negated
-                        ? cb.lessThanOrEqualTo((Expression<Comparable>) rawPath, val)
-                        : cb.greaterThan((Expression<Comparable>) rawPath, val);
+                        ? cb.lessThanOrEqualTo((Expression<Comparable>) effectiveLhs, val)
+                        : cb.greaterThan((Expression<Comparable>) effectiveLhs, val);
             }
             case GTE -> {
                 if (effectiveRhsField != null) {
@@ -260,10 +264,13 @@ public final class JpaCriteriaDataScopeTranslator {
                             ? cb.lessThan((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField)
                             : cb.greaterThanOrEqualTo((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField);
                 }
-                Comparable val = (Comparable) ((LiteralOperandIr) comp.rightOperand()).value();
+                Comparable val = (Comparable) normalizeScalarValue(
+                        ((LiteralOperandIr) comp.rightOperand()).value(),
+                        comp.caseInsensitive()
+                );
                 yield negated
-                        ? cb.lessThan((Expression<Comparable>) rawPath, val)
-                        : cb.greaterThanOrEqualTo((Expression<Comparable>) rawPath, val);
+                        ? cb.lessThan((Expression<Comparable>) effectiveLhs, val)
+                        : cb.greaterThanOrEqualTo((Expression<Comparable>) effectiveLhs, val);
             }
             case LT -> {
                 if (effectiveRhsField != null) {
@@ -271,10 +278,13 @@ public final class JpaCriteriaDataScopeTranslator {
                             ? cb.greaterThanOrEqualTo((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField)
                             : cb.lessThan((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField);
                 }
-                Comparable val = (Comparable) ((LiteralOperandIr) comp.rightOperand()).value();
+                Comparable val = (Comparable) normalizeScalarValue(
+                        ((LiteralOperandIr) comp.rightOperand()).value(),
+                        comp.caseInsensitive()
+                );
                 yield negated
-                        ? cb.greaterThanOrEqualTo((Expression<Comparable>) rawPath, val)
-                        : cb.lessThan((Expression<Comparable>) rawPath, val);
+                        ? cb.greaterThanOrEqualTo((Expression<Comparable>) effectiveLhs, val)
+                        : cb.lessThan((Expression<Comparable>) effectiveLhs, val);
             }
             case LTE -> {
                 if (effectiveRhsField != null) {
@@ -282,10 +292,13 @@ public final class JpaCriteriaDataScopeTranslator {
                             ? cb.greaterThan((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField)
                             : cb.lessThanOrEqualTo((Expression<Comparable>) effectiveLhs, (Expression<Comparable>) effectiveRhsField);
                 }
-                Comparable val = (Comparable) ((LiteralOperandIr) comp.rightOperand()).value();
+                Comparable val = (Comparable) normalizeScalarValue(
+                        ((LiteralOperandIr) comp.rightOperand()).value(),
+                        comp.caseInsensitive()
+                );
                 yield negated
-                        ? cb.greaterThan((Expression<Comparable>) rawPath, val)
-                        : cb.lessThanOrEqualTo((Expression<Comparable>) rawPath, val);
+                        ? cb.greaterThan((Expression<Comparable>) effectiveLhs, val)
+                        : cb.lessThanOrEqualTo((Expression<Comparable>) effectiveLhs, val);
             }
             case STARTS_WITH -> {
                 String prefix = escapeLikeWildcards(String.valueOf(
