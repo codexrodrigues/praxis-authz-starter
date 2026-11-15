@@ -4,7 +4,7 @@ Thank you for contributing to `praxis-authz-starter`.
 
 ## Development Baseline
 
-- **Java:** 21 (`[21,22)` enforced by `maven-enforcer-plugin`)
+- **Java:** 21+ (`[21,)` enforced by `maven-enforcer-plugin`, compiled with `--release 21`)
 - **Maven:** 3.9.0 or newer
 - **Spring Boot Parent:** `3.5.15`
 

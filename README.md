@@ -72,9 +72,13 @@ Use zero-blueprint introspection (`AuthzResourceGovernanceSpec.fromAnnotatedReso
 
 ```java
 import org.praxisplatform.authz.host.metadata.AbstractAuthzGovernedResourceService;
+import org.praxisplatform.authz.host.metadata.AuthzCallerContextProvider;
+import org.praxisplatform.authz.host.metadata.AuthzGovernedResourceServiceSupport;
 import org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec;
-import org.praxisplatform.uischema.annotation.ApiResource;
+import org.praxisplatform.uischema.repository.base.BaseCrudRepository;
+import org.springframework.stereotype.Service;
 
+@Service
 public class EmployeeLeaveService extends AbstractAuthzGovernedResourceService<
         EmployeeLeaveEntity,
         EmployeeLeaveResponseDTO,
@@ -92,6 +96,21 @@ public class EmployeeLeaveService extends AbstractAuthzGovernedResourceService<
                     EmployeeLeaveFilterDTO.class,
                     EmployeeLeaveController.class
             );
+
+    protected EmployeeLeaveService(
+            BaseCrudRepository<EmployeeLeaveEntity, Long> repository,
+            AuthzGovernedResourceServiceSupport serviceSupport,
+            AuthzCallerContextProvider callerContextProvider
+    ) {
+        super(
+                repository,
+                EmployeeLeaveEntity.class,
+                EmployeeLeaveResponseDTO.class,
+                serviceSupport,
+                SPEC,
+                callerContextProvider
+        );
+    }
 }
 ```
 
