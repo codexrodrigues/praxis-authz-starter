@@ -25,7 +25,7 @@ Em vez de construir manualmente `FactContract`, `QueryableResourceProjection`, `
 ```java
 AuthzResourceGovernanceSpec<AfastamentoEntity> spec = AuthzResourceGovernanceSpec
         .<AfastamentoEntity>builder("human-resources.afastamentos")
-        .serviceKey("praxis-ergon-showcase")
+        .serviceKey("praxis-hr-service")
         // 1. Bindings declarativos que geram automaticamente QueryableResourceProjection, FactContract e DecisionPointDescriptor
         .scalarFieldBinding(
                 "resource.lotacaoSetorId",
@@ -61,7 +61,7 @@ AuthzResourceGovernanceSpec<AfastamentoEntity> spec = AuthzResourceGovernanceSpe
 // RuntimeDecisionPointRegistry e SemanticDecisionPointCatalogService (com todos os 18 FieldLineageCatalogEntry):
 @Bean
 public AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle authzBootstrapBundle() {
-    return AuthzHostPolicyBootstrapBuilder.forService("praxis-ergon-showcase")
+    return AuthzHostPolicyBootstrapBuilder.forService("praxis-hr-service")
             .addResourceSpec(
                     spec,
                     AfastamentoResponseDTO.class,
@@ -175,7 +175,7 @@ public class AfastamentoGovernedService extends AbstractAuthzGovernedResourceSer
                         "calc-prazo-retorno",
                         AfastamentoResource.RESOURCE_KEY,
                         "calcularPrazoRetorno",
-                        "/api/ergon/afastamentos/determinations/prazo-retorno",
+                        "/api/hr/afastamentos/determinations/prazo-retorno",
                         Set.of(ReactiveDeterminationFormMode.CREATE, ReactiveDeterminationFormMode.EDIT),
                         Set.of(ReactiveDeterminationTriggerType.FIELD_CHANGE),
                         List.of("/uoOrigemId"),
@@ -265,16 +265,16 @@ AuthzPolicySimulationHarness.forResource(spec, bundle, AfastamentoResponseDTO.cl
         .expectItemAvailability("Cedente não designa substituto", cedenteCaller, "designar-substituto", entity101, false, "dual-scope-custody-denied")
         .expectCollectionAvailability("Cedente pode homologar em lote", cedenteCaller, "homologar-lote", true, null)
         .expectBulkCommand("Coorte mista em PER_ITEM", cedenteCaller, "homologar-lote", List.of(entity101, entity102), e -> e.getId(), BatchAuthorizationMode.PER_ITEM, List.of(true, false))
-        .expectTargetReadAllowed("Leitura mascara CID", cedenteCaller, entity101, rawDto, Set.of("ergon.afastamentos.cid_codigo"))
-        .expectDuplicateDraft("Clonagem assistida limpa CID e partição Cessionário", cedenteCaller, entity101, rawDraft, true, Set.of("ergon.afastamentos.cid_codigo", "substitutoDesignado"))
+        .expectTargetReadAllowed("Leitura mascara CID", cedenteCaller, entity101, rawDto, Set.of("hr.afastamentos.cid_codigo"))
+        .expectDuplicateDraft("Clonagem assistida limpa CID e partição Cessionário", cedenteCaller, entity101, rawDraft, true, Set.of("hr.afastamentos.cid_codigo", "substitutoDesignado"))
         .expectCollectionExport("Exportação exclui campos não-exportáveis e VALUE+DENY", cedenteCaller, List.of(entity101, entity102), service::toRawDto, 1, Set.of("cidCodigo"))
-        .expectReactiveDetermination("Determinação reativa mascara CID", cedenteCaller, entity101, Map.of("cidCodigo", "J11", "diasPrevistos", 15), true, Set.of("ergon.afastamentos.cid_codigo"))
-        .expectAiContextProjection("Projeção AI suprime CID", cedenteCaller, entity101, rawDto, true, Set.of("cidCodigo", "ergon.afastamentos.cid_codigo"))
-        .expectQueryFieldUse("Filtro em CID sensível bloqueado fail-closed", cedenteCaller, Map.of(FieldUseCategory.FILTER, Set.of("cidCodigo")), false, FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo")
-        .expectGroupByStats("Agrupamento em CID bloqueado", cedenteCaller, "cidCodigo", Set.of(), false, FieldUseCategory.GROUP, "ergon.afastamentos.cid_codigo")
+        .expectReactiveDetermination("Determinação reativa mascara CID", cedenteCaller, entity101, Map.of("cidCodigo", "J11", "diasPrevistos", 15), true, Set.of("hr.afastamentos.cid_codigo"))
+        .expectAiContextProjection("Projeção AI suprime CID", cedenteCaller, entity101, rawDto, true, Set.of("cidCodigo", "hr.afastamentos.cid_codigo"))
+        .expectQueryFieldUse("Filtro em CID sensível bloqueado fail-closed", cedenteCaller, Map.of(FieldUseCategory.FILTER, Set.of("cidCodigo")), false, FieldUseCategory.FILTER, "hr.afastamentos.cid_codigo")
+        .expectGroupByStats("Agrupamento em CID bloqueado", cedenteCaller, "cidCodigo", Set.of(), false, FieldUseCategory.GROUP, "hr.afastamentos.cid_codigo")
         .expectOptionSource("OptionSource filtra apenas itens em escopo", cedenteCaller, List.of(entity101, entity102), e -> new OptionDTO<>(e.getId(), e.getStatus(), Map.of()), Set.of(101L))
         .expectUpdateMutation("Cedente bloqueado ao editar partição Cessionário", cedenteCaller, entity101, updateSubstitutoDto, false, "dual-scope-custody-denied")
-        .expectComparisonStats("ComparisonStats bloqueia filtro em CID sensível", cedenteCaller, "statusAfastamento", Set.of(), filterPadrao, filterPorCid, false, FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo")
+        .expectComparisonStats("ComparisonStats bloqueia filtro em CID sensível", cedenteCaller, "statusAfastamento", Set.of(), filterPadrao, filterPorCid, false, FieldUseCategory.FILTER, "hr.afastamentos.cid_codigo")
         .expectBulkUpdateCohort("BulkUpdate em REJECT_ALL aborta coorte quando 1 item está fora de escopo", cedenteCaller, List.of(entity101, entity102), e -> e.getId(), updateCidDto, BatchAuthorizationMode.REJECT_ALL, true, Set.of())
         .expectBulkUpdateCohort("BulkUpdate em PER_ITEM confirma apenas itens elegíveis", cedenteCaller, List.of(entity101, entity102), e -> e.getId(), updateCidDto, BatchAuthorizationMode.PER_ITEM, false, Set.of(101L))
         .expectTwoPhaseBulkConfirm("Bulk 2 fases bloqueia Confused Deputy", cedenteCaller, outroCaller, "digest-v1", "digest-v1", List.of(entity101), e -> e.getId(), service::toRawDto, updateCidDto, BatchAuthorizationMode.REJECT_ALL, false, "AUTHZ_BULK_CONFUSED_DEPUTY_DENIED")
