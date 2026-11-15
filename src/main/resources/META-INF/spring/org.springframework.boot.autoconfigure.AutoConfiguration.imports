@@ -1,0 +1,2 @@
+org.praxisplatform.authz.autoconfigure.PraxisAuthzAutoConfiguration
+org.praxisplatform.authz.autoconfigure.PraxisAuthzHostBridgeAutoConfiguration

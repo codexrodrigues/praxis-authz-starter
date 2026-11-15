@@ -1,0 +1,1067 @@
+package org.praxisplatform.authz.host.metadata;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import org.praxisplatform.authz.contracts.context.FactResolutionStatus;
+import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor;
+import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
+import org.praxisplatform.authz.contracts.envelope.FieldUseEffectDirective;
+import org.praxisplatform.authz.contracts.envelope.MaskDirective;
+import org.praxisplatform.authz.contracts.envelope.RuleEffect;
+import org.praxisplatform.authz.contracts.policy.DualScopeDelegationSpec;
+import org.praxisplatform.authz.enforcement.jpa.JpaDataScopeAdapter;
+import org.praxisplatform.authz.enforcement.masking.DetachedDtoMaskingProcessor;
+import org.praxisplatform.authz.enforcement.masking.DetachedDtoMaskingResult;
+import org.praxisplatform.authz.enforcement.masking.DtoFieldSchemaMetadata;
+import org.praxisplatform.authz.enforcement.writeintent.FieldWriteViolationException;
+import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract;
+import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
+import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.AuthorizedPreMutationContext;
+import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.AuthorizedQueryScopeContext;
+import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.TargetReadProjectionEvaluation;
+import org.praxisplatform.uischema.bulk.BulkDomainResourceAdapter;
+import org.praxisplatform.uischema.capability.ResourceStateSnapshotProvider;
+import org.praxisplatform.uischema.command.ResourceCommandExecutionException;
+import org.praxisplatform.uischema.command.ResourceCommandExecutionProvider;
+import org.praxisplatform.uischema.command.ResourceCommandOutcome;
+import org.praxisplatform.uischema.determination.ReactiveDeterminationDefinitionProvider;
+import org.praxisplatform.uischema.exporting.CollectionExportExecutor;
+import org.praxisplatform.uischema.mapper.base.ResourceMapper;
+import org.praxisplatform.uischema.options.service.OptionSourceProvider;
+import org.praxisplatform.uischema.options.service.OptionSourceQueryExecutor;
+import org.praxisplatform.uischema.service.base.AbstractBaseResourceService;
+import org.praxisplatform.uischema.service.base.ResourceFilterAccessScope;
+import org.praxisplatform.uischema.stats.service.StatsQueryExecutor;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+/**
+ * Canonical Spring/JPA lifecycle bridge connecting {@code praxis-metadata-starter}'s
+ * {@code AbstractBaseQueryResourceService} and {@code AbstractBaseResourceService} hooks directly
+ * to {@link MetadataResourceAuthorizationSeam} and {@link JpaCriteriaDataScopeTranslator}
+ * ({@code CC03}, {@code CC06}, {@code CC07}, {@code CC08}, {@code R-11}, {@code P01..P22}).
+ *
+ * <p>Provides a thread-safe transaction/request-scoped context holder so that:</p>
+ * <ul>
+ *   <li>{@code resolveResourceFilterAccessScope()} evaluates OPA {@code SEARCH} (3-step {@code SameInstanceSearchRevisionGuard}),
+ *       enforces {@code FieldUseQueryGuard} ({@code FILTER}/{@code SORT}/{@code GROUP}), composes the
+ *       {@link ResourceFilterAccessScope} via {@link JpaCriteriaDataScopeTranslator}, and pins the
+ *       {@link AuthorizedQueryScopeContext} for response masking;</li>
+ *   <li>{@code beforeUpdate(...)} / {@code beforeCreate(...)} executes pre-hydration {@code FIELD_WRITE}
+ *       and {@code DualScopeDelegationSpec} ({@code Cedente} vs {@code Cessionário}) strictly before
+ *       {@code hydrate*} and {@code PraxisRulesEngine} ({@code R-11} / {@code STEP_11} before {@code STEP_12});</li>
+ *   <li>{@code afterUpdate(...)} / {@code afterCreate(...)} fulfills {@code BEFORE_COMMIT_OUTBOX}
+ *       obligations ({@code JdbcTransactionalAuditOutbox}) inside the same {@code @Transactional} boundary
+ *       ({@code STEP_14}) and masks the detached {@code ResponseDTO} ({@code STEP_15}).</li>
+ * </ul>
+ */
+public final class AuthzGovernedResourceServiceSupport {
+
+    private static final StackWalker STACK_WALKER =
+            StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+
+    private final MetadataResourceAuthorizationSeam authorizationSeam;
+    private final DetachedDtoMaskingProcessor maskingProcessor;
+    private final MetadataDtoGovernanceIntrospector dtoIntrospector;
+    private final ObjectMapper objectMapper;
+
+    private final ThreadLocal<AuthorizedQueryScopeContext> activeQueryContext = new ThreadLocal<>();
+    private final ThreadLocal<AuthorizedPreMutationContext> activeMutationContext = new ThreadLocal<>();
+    private final ThreadLocal<Boolean> mutationReadyForResponseMasking = new ThreadLocal<>();
+    private final ThreadLocal<List<MaskDirective>> activeExportMaskDirectives = new ThreadLocal<>();
+    private final ThreadLocal<Set<String>> activeExportValueDeniedAttributeIds = new ThreadLocal<>();
+    private final ThreadLocal<Deque<AuthorizedPreMutationContext>> pendingDeleteContexts = new ThreadLocal<>();
+    private final ThreadLocal<Map<FieldUseCategory, Set<String>>> activeExtractedQueryFieldUses = new ThreadLocal<>();
+    private volatile IntrospectedDtoGovernanceContract lastIntrospectedContract;
+
+    /**
+     * Creates a governed resource service support bridge.
+     *
+     * @param authorizationSeam canonical metadata resource authorization seam
+     * @param maskingProcessor detached DTO masking processor
+     */
+    public AuthzGovernedResourceServiceSupport(
+            MetadataResourceAuthorizationSeam authorizationSeam,
+            DetachedDtoMaskingProcessor maskingProcessor
+    ) {
+        this(authorizationSeam, maskingProcessor, new MetadataDtoGovernanceIntrospector());
+    }
+
+    /**
+     * Creates a governed resource service support bridge with an explicit {@link MetadataDtoGovernanceIntrospector}.
+     *
+     * @param authorizationSeam canonical metadata resource authorization seam
+     * @param maskingProcessor detached DTO masking processor
+     * @param dtoIntrospector metadata DTO governance introspector
+     */
+    public AuthzGovernedResourceServiceSupport(
+            MetadataResourceAuthorizationSeam authorizationSeam,
+            DetachedDtoMaskingProcessor maskingProcessor,
+            MetadataDtoGovernanceIntrospector dtoIntrospector
+    ) {
+        this.authorizationSeam = Objects.requireNonNull(authorizationSeam, "authorizationSeam is required");
+        this.maskingProcessor = Objects.requireNonNull(maskingProcessor, "maskingProcessor is required");
+        this.dtoIntrospector = Objects.requireNonNull(dtoIntrospector, "dtoIntrospector is required");
+        this.objectMapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    }
+
+    /** Returns the {@link MetadataDtoGovernanceIntrospector} used to inspect DTO annotations. */
+    public MetadataDtoGovernanceIntrospector dtoIntrospector() {
+        return dtoIntrospector;
+    }
+
+    /**
+     * Wraps a host {@link ResourceMapper} in an {@link AuthzMaskingResourceMapperDecorator} using
+     * schema metadata automatically introspected from {@code responseType} ({@code P11}, {@code P12}, {@code P13}, {@code P40}).
+     */
+    public <E, R, C, U, ID> ResourceMapper<E, R, C, U, ID> wrapResourceMapper(
+            ResourceMapper<E, R, C, U, ID> delegate,
+            Class<R> responseType,
+            String resourceKey
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzMaskingResourceMapperDecorator<>(delegate, this, responseType, contract.fieldSchemas());
+    }
+
+    /**
+     * Wraps a host {@link CollectionExportExecutor} in an {@link AuthzGovernedCollectionExportExecutor}
+     * using schema and governance metadata automatically introspected from {@code responseType} and
+     * dynamically applying the per-request OPA {@link MaskDirective}s ({@code P10.2-R03}).
+     */
+    public CollectionExportExecutor wrapCollectionExportExecutor(
+            CollectionExportExecutor delegate,
+            Class<?> responseType,
+            String resourceKey
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzGovernedCollectionExportExecutor(
+                delegate,
+                maskingProcessor,
+                contract,
+                this::currentExportMaskDirectives,
+                this::currentExportValueDeniedAttributeIds
+        );
+    }
+
+    /**
+     * Creates an {@link AuthzResourceOperationAvailabilityProvider} backed by this bridge's
+     * {@link MetadataResourceAuthorizationSeam} and an optional {@link ResourceStateSnapshotProvider}
+     * fallback ({@code Fase P10.4}, {@code P10}, {@code P17}).
+     *
+     * @param snapshotProviderFallback optional snapshot provider fallback
+     * @return new {@link AuthzResourceOperationAvailabilityProvider}
+     */
+    public AuthzResourceOperationAvailabilityProvider createAvailabilityProvider(
+            ResourceStateSnapshotProvider snapshotProviderFallback
+    ) {
+        return new AuthzResourceOperationAvailabilityProvider(authorizationSeam, snapshotProviderFallback);
+    }
+
+    /**
+     * Wraps a {@link BulkDomainResourceAdapter} created by
+     * {@code AbstractBaseResourceService.bulkDomainAdapter(...)} into an
+     * {@link AuthzGovernedBulkDomainResourceAdapter} ({@code Fase P10.5}, {@code P15}, {@code P18}, {@code P19}, {@code P34}).
+     *
+     * @param delegate underlying bulk domain resource adapter
+     * @param <ID> resource identifier type
+     * @param <F> filter DTO type
+     * @return governed {@link AuthzGovernedBulkDomainResourceAdapter}
+     */
+    public <ID, F> AuthzGovernedBulkDomainResourceAdapter<ID, F> wrapBulkDomainResourceAdapter(
+            BulkDomainResourceAdapter<ID, F> delegate
+    ) {
+        return new AuthzGovernedBulkDomainResourceAdapter<>(delegate, this, lastIntrospectedContract);
+    }
+
+    /**
+     * Wraps a {@link BulkDomainResourceAdapter} into an {@link AuthzGovernedBulkDomainResourceAdapter}
+     * with governance metadata explicitly introspected from {@code responseType}
+     * ({@code Fase P10.5}, {@code P10.6-R01}, {@code P11}, {@code P12}, {@code P15}, {@code P50}).
+     */
+    public <ID, F> AuthzGovernedBulkDomainResourceAdapter<ID, F> wrapBulkDomainResourceAdapter(
+            BulkDomainResourceAdapter<ID, F> delegate,
+            Class<?> responseType,
+            String resourceKey
+    ) {
+        return wrapBulkDomainResourceAdapter(delegate, responseType, resourceKey, null);
+    }
+
+    /**
+     * Wraps a {@link BulkDomainResourceAdapter} into an {@link AuthzGovernedBulkDomainResourceAdapter}
+     * with governance metadata explicitly introspected from {@code responseType} and optional
+     * {@link AuthzResourceGovernanceSpec} ({@code Fase P10.20-A}).
+     */
+    public <ID, F> AuthzGovernedBulkDomainResourceAdapter<ID, F> wrapBulkDomainResourceAdapter(
+            BulkDomainResourceAdapter<ID, F> delegate,
+            Class<?> responseType,
+            String resourceKey,
+            AuthzResourceGovernanceSpec<?> governanceSpec
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzGovernedBulkDomainResourceAdapter<>(delegate, this, contract, governanceSpec);
+    }
+
+    /**
+     * Wraps a host {@link OptionSourceQueryExecutor} (such as {@code CompositeOptionSourceQueryExecutor}
+     * or {@code JpaOptionSourceQueryExecutor}) into an {@link AuthzGovernedOptionSourceProvider}
+     * using governance metadata automatically introspected from {@code responseType}
+     * ({@code Fase P10.5}, {@code P05}, {@code P06}, {@code P07}, {@code P09}, {@code P12}, {@code P50}).
+     *
+     * @param delegate underlying option-source query executor
+     * @param responseType annotated response/entity DTO class
+     * @param resourceKey canonical resource key
+     * @return governed {@link AuthzGovernedOptionSourceProvider}
+     */
+    public AuthzGovernedOptionSourceProvider wrapOptionSourceQueryExecutor(
+            OptionSourceQueryExecutor delegate,
+            Class<?> responseType,
+            String resourceKey
+    ) {
+        return wrapOptionSourceQueryExecutor(delegate, responseType, resourceKey, null);
+    }
+
+    /**
+     * Wraps a host {@link OptionSourceQueryExecutor} into an {@link AuthzGovernedOptionSourceProvider}
+     * with governance metadata introspected from {@code responseType} and optional
+     * {@link AuthzResourceGovernanceSpec} ({@code Fase P10.25-A}).
+     */
+    public AuthzGovernedOptionSourceProvider wrapOptionSourceQueryExecutor(
+            OptionSourceQueryExecutor delegate,
+            Class<?> responseType,
+            String resourceKey,
+            AuthzResourceGovernanceSpec<?> governanceSpec
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzGovernedOptionSourceProvider(delegate, this, maskingProcessor, contract, governanceSpec);
+    }
+
+    /**
+     * Wraps a host {@link OptionSourceProvider} (such as {@code JpaOptionSourceProvider}) into an
+     * {@link AuthzGovernedOptionSourceProvider} using governance metadata automatically introspected
+     * from {@code responseType} ({@code Fase P10.5}, {@code P05}, {@code P06}, {@code P07}, {@code P09}, {@code P12}, {@code P50}).
+     *
+     * @param delegate underlying option-source provider
+     * @param responseType annotated response/entity DTO class
+     * @param resourceKey canonical resource key
+     * @return governed {@link AuthzGovernedOptionSourceProvider}
+     */
+    public AuthzGovernedOptionSourceProvider wrapOptionSourceProvider(
+            OptionSourceProvider delegate,
+            Class<?> responseType,
+            String resourceKey
+    ) {
+        return wrapOptionSourceProvider(delegate, responseType, resourceKey, null);
+    }
+
+    /**
+     * Wraps a host {@link OptionSourceProvider} into an {@link AuthzGovernedOptionSourceProvider}
+     * with governance metadata introspected from {@code responseType} and optional
+     * {@link AuthzResourceGovernanceSpec} ({@code Fase P10.25-A}).
+     */
+    public AuthzGovernedOptionSourceProvider wrapOptionSourceProvider(
+            OptionSourceProvider delegate,
+            Class<?> responseType,
+            String resourceKey,
+            AuthzResourceGovernanceSpec<?> governanceSpec
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzGovernedOptionSourceProvider(delegate, this, maskingProcessor, contract, governanceSpec);
+    }
+
+    /**
+     * Wraps a host {@link StatsQueryExecutor} (such as {@code JpaStatsQueryExecutor}) into an
+     * {@link AuthzGovernedStatsQueryExecutor} using governance metadata automatically introspected
+     * from {@code responseType} ({@code Fase P10.6}, {@code P05}, {@code P08}, {@code P10},
+     * {@code P14}, {@code P46}).
+     *
+     * @param delegate underlying stats query executor
+     * @param responseType annotated response/entity DTO class
+     * @param resourceKey canonical resource key
+     * @return governed {@link AuthzGovernedStatsQueryExecutor}
+     */
+    public AuthzGovernedStatsQueryExecutor wrapStatsQueryExecutor(
+            StatsQueryExecutor delegate,
+            Class<?> responseType,
+            String resourceKey
+    ) {
+        return wrapStatsQueryExecutor(delegate, responseType, resourceKey, null);
+    }
+
+    /**
+     * Wraps a host {@link StatsQueryExecutor} into an {@link AuthzGovernedStatsQueryExecutor}
+     * with governance metadata introspected from {@code responseType} and optional
+     * {@link AuthzResourceGovernanceSpec} ({@code Fase P10.20-A}).
+     */
+    public AuthzGovernedStatsQueryExecutor wrapStatsQueryExecutor(
+            StatsQueryExecutor delegate,
+            Class<?> responseType,
+            String resourceKey,
+            AuthzResourceGovernanceSpec<?> governanceSpec
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzGovernedStatsQueryExecutor(delegate, this, contract, governanceSpec);
+    }
+
+    /**
+     * Wraps a host {@link ReactiveDeterminationDefinitionProvider} into an
+     * {@link AuthzGovernedReactiveDeterminationProvider} using governance metadata automatically
+     * introspected from {@code responseType} ({@code Fase P10.6}, {@code P05}, {@code P11},
+     * {@code P12}, {@code P13}, {@code P14}, {@code P46}, {@code P47}, {@code P49}, {@code P50},
+     * {@code P57}, {@code P62}).
+     *
+     * @param delegate underlying reactive determination definition provider
+     * @param responseType annotated response/entity DTO class
+     * @param resourceKey canonical resource key
+     * @return governed {@link AuthzGovernedReactiveDeterminationProvider}
+     */
+    public AuthzGovernedReactiveDeterminationProvider wrapReactiveDeterminationProvider(
+            ReactiveDeterminationDefinitionProvider delegate,
+            Class<?> responseType,
+            String resourceKey
+    ) {
+        IntrospectedDtoGovernanceContract contract = dtoIntrospector.introspect(responseType, resourceKey);
+        this.lastIntrospectedContract = contract;
+        return new AuthzGovernedReactiveDeterminationProvider(delegate, this, contract);
+    }
+
+    /**
+     * Wraps a host {@link ResourceCommandExecutionProvider} so that any pre-mutation authorization
+     * or dual-scope custody rejection ({@link FieldWriteViolationException} or {@link SecurityException})
+     * raised at {@code STEP_11} (for example, when replaying a stale HATEOAS link after a policy or
+     * custody change) is translated into a canonical {@link ResourceCommandExecutionException} with
+     * {@link ResourceCommandOutcome#PERMISSION_DENIED} and sanitized evidence, while preserving
+     * {@code ResourceVersionPreconditionException} ({@code 412}/{@code 428}) and
+     * {@code PraxisRuleViolationException} ({@code 422}) ({@code Fase P10.4}, {@code P10}, {@code P17}).
+     *
+     * @param delegate underlying command execution provider
+     * @return governed {@link ResourceCommandExecutionProvider}
+     */
+    public ResourceCommandExecutionProvider wrapCommandExecutionProvider(
+            ResourceCommandExecutionProvider delegate
+    ) {
+        Objects.requireNonNull(delegate, "delegate is required");
+        return request -> {
+            try {
+                return delegate.execute(request);
+            } catch (FieldWriteViolationException ex) {
+                throw new ResourceCommandExecutionException(
+                        ResourceCommandOutcome.PERMISSION_DENIED,
+                        ex.getMessage(),
+                        Map.of(
+                                "reasonCode", ex.getReasonCode(),
+                                "forbiddenAttributeIds", ex.getForbiddenAttributeIds()
+                        )
+                );
+            } catch (SecurityException ex) {
+                throw new ResourceCommandExecutionException(
+                        ResourceCommandOutcome.PERMISSION_DENIED,
+                        ex.getMessage() != null ? ex.getMessage() : "Command execution denied by authorization policy.",
+                        Map.of("reasonCode", "AUTHZ_COMMAND_SECURITY_DENIED")
+                );
+            } finally {
+                activeQueryContext.remove();
+                activeMutationContext.remove();
+                mutationReadyForResponseMasking.remove();
+            }
+        };
+    }
+
+    /**
+     * Returns {@code true} if an {@link AuthorizedQueryScopeContext} is currently bound to the
+     * thread (for example, after {@code resolveResourceFilterAccessScope()} in {@code filter(...)},
+     * {@code exportCollection(...)}, or the first row of {@code findAllById(...)}).
+     *
+     * @return {@code true} when a query authorization context is active
+     */
+    public boolean hasActiveQueryContext() {
+        return activeQueryContext.get() != null;
+    }
+
+    /**
+     * Ensures that an {@link AuthorizedQueryScopeContext} is bound to the current thread before
+     * checking row-level entity access in {@code assertEntityAccessAllowed(E)}.
+     *
+     * <p>When {@code filter(...)}, {@code exportCollection(...)}, or {@code findAllById(...)} calls
+     * {@code assertEntitiesAccessAllowed(entities)} across {@code N} rows, or when
+     * {@code findEntityForMutation(id)} invokes {@code assertEntityAccessAllowed(entity)} twice,
+     * this method runs {@code scopeInitializer} (typically {@code this::resolveResourceFilterAccessScope})
+     * at most once per operation instead of triggering {@code N+1} redundant OPA {@code SEARCH}
+     * evaluations ({@code P10.4-R03}).</p>
+     *
+     * @param scopeInitializer callback that resolves and binds the query scope when none is active
+     */
+    public void ensureActiveQueryContext(Runnable scopeInitializer) {
+        Objects.requireNonNull(scopeInitializer, "scopeInitializer is required");
+        if (activeQueryContext.get() == null) {
+            scopeInitializer.run();
+        }
+    }
+
+    /** Returns the active per-request OPA {@link MaskDirective}s for collection export, or an empty list. */
+    public List<MaskDirective> currentExportMaskDirectives() {
+        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+        if (queryCtx != null && queryCtx.maskDirectives() != null) {
+            return queryCtx.maskDirectives();
+        }
+        List<MaskDirective> exportMasks = activeExportMaskDirectives.get();
+        return exportMasks == null ? List.of() : exportMasks;
+    }
+
+    /** Returns the active per-request dynamically value-denied attribute IDs for collection export ({@code Fase P10.17-A}). */
+    public Set<String> currentExportValueDeniedAttributeIds() {
+        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+        if (queryCtx != null && queryCtx.valueDeniedAttributeIds() != null) {
+            return queryCtx.valueDeniedAttributeIds();
+        }
+        Set<String> exportValueDenied = activeExportValueDeniedAttributeIds.get();
+        return exportValueDenied == null ? Set.of() : exportValueDenied;
+    }
+
+    /**
+     * Evaluates OPA {@code SEARCH} authorization, enforces {@code FieldUseQueryGuard}, translates
+     * the {@code DataScopePlan} into a real Spring Data JPA {@link ResourceFilterAccessScope}, and
+     * binds the resulting {@link AuthorizedQueryScopeContext} for subsequent response masking
+     * ({@code P01}, {@code P05..P09}, {@code P17}, {@code P50}).
+     *
+     * @param decisionPoint canonical decision point descriptor
+     * @param factContractDigest SHA-256 digest of the governing {@code FactContract}
+     * @param requestHeaderNames raw HTTP request header names (rejected fail-closed if spoofing scope)
+     * @param resolvedSubjectAndEnvFacts trusted resolved subject and environment facts
+     * @param factStatuses 4-state resolution statuses
+     * @param requestedFieldUses requested {@code FILTER}, {@code SORT}, {@code GROUP} attribute IDs
+     * @param baselineFieldUseDirectives baseline field-use directives from {@code @DomainGovernance}
+     * @param jpaDataScopeAdapter canonical JPQL data scope adapter
+     * @param hardScopeJpql mandatory host JPQL hard scope clause
+     * @param hardScopeParams mandatory host JPQL hard scope parameters
+     * @param criteriaTranslator JPA Criteria translator for {@link ResourceFilterAccessScope}
+     * @param hardScope mandatory host {@link ResourceFilterAccessScope}
+     * @param <E> JPA entity type
+     * @return composed {@link ResourceFilterAccessScope} ready for {@code AbstractBaseQueryResourceService}
+     */
+    public <E> ResourceFilterAccessScope<E> authorizeAndResolveAccessScope(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            Set<String> requestHeaderNames,
+            Map<String, Object> resolvedSubjectAndEnvFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            Map<FieldUseCategory, Set<String>> requestedFieldUses,
+            List<FieldUseEffectDirective> baselineFieldUseDirectives,
+            JpaDataScopeAdapter jpaDataScopeAdapter,
+            String hardScopeJpql,
+            Map<String, Object> hardScopeParams,
+            JpaCriteriaDataScopeTranslator criteriaTranslator,
+            ResourceFilterAccessScope<E> hardScope
+    ) {
+        clearContext();
+        registerTransactionCleanupIfActive();
+        AuthorizedQueryScopeContext queryCtx = authorizationSeam.authorizeAndCompileJpaQueryScope(
+                decisionPoint,
+                factContractDigest,
+                requestHeaderNames,
+                resolvedSubjectAndEnvFacts,
+                factStatuses,
+                requestedFieldUses,
+                baselineFieldUseDirectives,
+                jpaDataScopeAdapter,
+                hardScopeJpql,
+                hardScopeParams,
+                row -> true
+        );
+        List<MaskDirective> masks = queryCtx.maskDirectives() == null ? List.of() : queryCtx.maskDirectives();
+        activeExportMaskDirectives.set(masks);
+        Set<String> valueDenied = queryCtx.valueDeniedAttributeIds() == null ? Set.of() : queryCtx.valueDeniedAttributeIds();
+        activeExportValueDeniedAttributeIds.set(valueDenied);
+        if (queryCtx.dataScopePlan() == null || queryCtx.scopeOutcome() == org.praxisplatform.authz.contracts.datascope.DataScopeOutcome.NONE) {
+            activeQueryContext.set(queryCtx);
+            return ResourceFilterAccessScope.denied();
+        }
+        ResourceFilterAccessScope<E> resolvedScope = criteriaTranslator.toResourceFilterAccessScope(
+                queryCtx.dataScopePlan(),
+                hardScope
+        );
+        activeQueryContext.set(queryCtx);
+        return resolvedScope;
+    }
+
+    /**
+     * Executes pre-hydration mutation authorization ({@code STEP_11}) before {@code hydrate*} and
+     * {@code PraxisRulesEngine} ({@code STEP_12}) and binds the {@link AuthorizedPreMutationContext}
+     * to the current thread ({@code R-11}, {@code P13}, {@code P14}).
+     */
+    public AuthorizedPreMutationContext authorizeBeforeHydrationAndRules(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            String operationVerb,
+            boolean partialPatch,
+            Object rawPayloadOrJson,
+            Map<String, String> wirePointerToAttributeIdMap,
+            Set<String> technicalConcurrencyPointers,
+            Set<String> mandatoryScopeAnchorAttributeIds,
+            DualScopeDelegationSpec dualScopeSpec,
+            boolean callerMatchesCedente,
+            boolean callerMatchesCessionario,
+            Map<String, Object> resolvedFacts,
+            Map<String, FactResolutionStatus> factStatuses
+    ) {
+        clearContext();
+        registerTransactionCleanupIfActive();
+        String rawJson;
+        try {
+            rawJson = rawPayloadOrJson instanceof String s
+                    ? s
+                    : objectMapper.writeValueAsString(rawPayloadOrJson);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("Failed to serialize mutation payload for WriteIntent extraction", ex);
+        }
+        AuthorizedPreMutationContext preCtx = authorizationSeam.authorizePreHydrationMutation(
+                decisionPoint,
+                factContractDigest,
+                operationVerb,
+                partialPatch,
+                rawJson,
+                wirePointerToAttributeIdMap,
+                technicalConcurrencyPointers,
+                mandatoryScopeAnchorAttributeIds,
+                dualScopeSpec,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                resolvedFacts,
+                factStatuses
+        );
+        activeMutationContext.set(preCtx);
+        mutationReadyForResponseMasking.set(Boolean.FALSE);
+        return preCtx;
+    }
+
+    /**
+     * Marks the current thread's mutation context ready for post-mutation outbox fulfillment and
+     * response masking inside {@link AuthzMaskingResourceMapperDecorator#toResponse(Object)}.
+     *
+     * <p>Invoke from {@code AbstractBaseResourceService.afterCreate(...)} / {@code afterUpdate(...)}.</p>
+     */
+    public void markPostMutationReadyForOutboxAndMasking() {
+        if (activeMutationContext.get() == null) {
+            throw new IllegalStateException(
+                    "No AuthorizedPreMutationContext bound on current thread; authorizeBeforeHydrationAndRules must run in beforeCreate/beforeUpdate");
+        }
+        mutationReadyForResponseMasking.set(Boolean.TRUE);
+    }
+
+    /**
+     * Executes pre-deletion authorization ({@code STEP_11}) before {@code validateDelete} ({@code STEP_12})
+     * and enqueues the {@link AuthorizedPreMutationContext} for FIFO outbox fulfillment in
+     * {@link #completeAfterDeleteOutbox()} across both single {@code deleteById} and batch
+     * {@code deleteAllById} operations ({@code R-07}, {@code R-11}, {@code P17}, {@code P19}).
+     */
+    public AuthorizedPreMutationContext authorizeBeforeDelete(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            DualScopeDelegationSpec dualScopeSpec,
+            boolean callerMatchesCedente,
+            boolean callerMatchesCessionario,
+            Map<String, Object> resolvedFacts,
+            Map<String, FactResolutionStatus> factStatuses
+    ) {
+        activeQueryContext.remove();
+        activeMutationContext.remove();
+        mutationReadyForResponseMasking.remove();
+        activeExportMaskDirectives.remove();
+        registerTransactionCleanupIfActive();
+
+        AuthorizedPreMutationContext preCtx = authorizationSeam.authorizePreHydrationMutation(
+                decisionPoint,
+                factContractDigest,
+                "DELETE",
+                false,
+                "{}",
+                Map.of(),
+                Set.of(),
+                Set.of(),
+                dualScopeSpec,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                resolvedFacts,
+                factStatuses
+        );
+        Deque<AuthorizedPreMutationContext> queue = pendingDeleteContexts.get();
+        if (queue == null) {
+            queue = new ArrayDeque<>();
+            pendingDeleteContexts.set(queue);
+        }
+        queue.addLast(preCtx);
+        return preCtx;
+    }
+
+    /**
+     * Fulfills {@code BEFORE_COMMIT_OUTBOX} obligations ({@code JdbcTransactionalAuditOutbox}) inside
+     * {@code AbstractBaseResourceService.afterDelete(ID, E)} for the next admitted deletion in FIFO
+     * order ({@code STEP_14}, {@code CC10}, {@code P19}, {@code P22}).
+     */
+    public void completeAfterDeleteOutbox() {
+        Deque<AuthorizedPreMutationContext> queue = pendingDeleteContexts.get();
+        AuthorizedPreMutationContext preCtx = queue == null ? null : queue.pollFirst();
+        if (preCtx == null) {
+            throw new IllegalStateException(
+                    "No pending delete AuthorizedPreMutationContext on current thread; authorizeBeforeDelete must run in beforeDelete");
+        }
+        if (queue.isEmpty()) {
+            pendingDeleteContexts.remove();
+            activeQueryContext.remove();
+            activeMutationContext.remove();
+            mutationReadyForResponseMasking.remove();
+        }
+        authorizationSeam.completePostDeleteOutbox(preCtx);
+    }
+
+    /**
+     * Internal callback invoked by {@link AuthzMaskingResourceMapperDecorator#toResponse(Object)}
+     * to apply post-mutation outbox + masking or query response masking without mutating JPA entities.
+     */
+    public <R> R maskMapperResponseIfReady(
+            R rawResponse,
+            Class<R> responseType,
+            List<DtoFieldSchemaMetadata> fieldSchemas
+    ) {
+        if (rawResponse == null) {
+            return null;
+        }
+        if (isInternalPreMutationDraftCall()) {
+            // Internal AbstractBaseResourceService draft/custom-field/bulk projection (P13, P14)
+            return rawResponse;
+        }
+        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
+        if (preCtx != null) {
+            if (!Boolean.TRUE.equals(mutationReadyForResponseMasking.get())) {
+                // Pre-mutation draft validation (STEP_12) sees raw unmasked values (P13, P14)
+                return rawResponse;
+            }
+            try {
+                DetachedDtoMaskingResult masked = authorizationSeam.completePostMutationAndMask(
+                        preCtx,
+                        rawResponse,
+                        fieldSchemas
+                );
+                return objectMapper.convertValue(masked.detachedProjection(), responseType);
+            } finally {
+                activeMutationContext.remove();
+                mutationReadyForResponseMasking.remove();
+            }
+        }
+        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+        if (queryCtx != null) {
+            List<DetachedDtoMaskingResult> maskedList = authorizationSeam.projectAndMaskQueryResults(
+                    queryCtx,
+                    List.of(rawResponse),
+                    fieldSchemas
+            );
+            return objectMapper.convertValue(maskedList.getFirst().detachedProjection(), responseType);
+        }
+        throw new IllegalStateException(
+                "Fail-closed: ResourceMapper.toResponse invoked without an active AuthorizedQueryScopeContext or AuthorizedPreMutationContext (P11, P12, P20)");
+    }
+
+    private static boolean isInternalPreMutationDraftCall() {
+        return STACK_WALKER.walk(frames -> frames.anyMatch(frame -> {
+            Class<?> declaring = frame.getDeclaringClass();
+            if (!AbstractBaseResourceService.class.isAssignableFrom(declaring)) {
+                return false;
+            }
+            String method = frame.getMethodName();
+            return "prepareCreateValidationDraft".equals(method)
+                    || "prepareUpdateValidationDraft".equals(method)
+                    || "prepareDomainMutationValidation".equals(method)
+                    || method.startsWith("lambda$prepareDomainMutationValidation$")
+                    || "toBulkUpdate".equals(method);
+        }));
+    }
+
+    private void registerTransactionCleanupIfActive() {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    clearContext();
+                }
+            });
+        }
+    }
+
+    /**
+     * Completes a query/mutation response batch in {@code AbstractBaseQueryResourceService.enrichResponses(List)}
+     * and clears thread-local query/mutation contexts while keeping export mask directives until transaction end.
+     */
+    public void completeBatchEnrichResponses() {
+        activeQueryContext.remove();
+        activeMutationContext.remove();
+        mutationReadyForResponseMasking.remove();
+    }
+
+    /**
+     * Clears any active query, mutation, or pending-delete thread-local contexts when a mutation
+     * or command aborts with an exception ({@code P10.10-R02}).
+     */
+    public void clearMutationAndQueryContextsOnFailure() {
+        activeQueryContext.remove();
+        activeMutationContext.remove();
+        mutationReadyForResponseMasking.remove();
+        pendingDeleteContexts.remove();
+    }
+
+    /**
+     * Fulfills {@code BEFORE_COMMIT_OUTBOX} obligations ({@code JdbcTransactionalAuditOutbox}) inside
+     * the active {@code @Transactional} boundary and returns the masked detached {@code ResponseDTO}
+     * ({@code STEP_14}, {@code STEP_15}, {@code P19}, {@code P22}).
+     */
+    public <ResponseDTO> ResponseDTO completePostMutationOutboxAndMask(
+            ResponseDTO responseDto,
+            Class<ResponseDTO> responseType,
+            List<DtoFieldSchemaMetadata> fieldSchemas
+    ) {
+        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
+        if (preCtx == null) {
+            throw new IllegalStateException(
+                    "No AuthorizedPreMutationContext bound on current thread; authorizeBeforeHydrationAndRules must run before mutation");
+        }
+        try {
+            DetachedDtoMaskingResult masked = authorizationSeam.completePostMutationAndMask(
+                    preCtx,
+                    responseDto,
+                    fieldSchemas
+            );
+            return objectMapper.convertValue(masked.detachedProjection(), responseType);
+        } finally {
+            activeMutationContext.remove();
+            mutationReadyForResponseMasking.remove();
+        }
+    }
+
+    /**
+     * Masks a list of materialized {@code ResponseDTO} instances using the active
+     * {@link AuthorizedQueryScopeContext} without mutating managed JPA entities, failing closed
+     * if no query authorization context is bound ({@code P11}, {@code P12}, {@code P20}).
+     */
+    public <ResponseDTO> List<ResponseDTO> maskQueryResponseDtos(
+            List<ResponseDTO> responses,
+            Class<ResponseDTO> responseType,
+            List<DtoFieldSchemaMetadata> fieldSchemas
+    ) {
+        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+        try {
+            if (queryCtx == null) {
+                throw new IllegalStateException(
+                        "No AuthorizedQueryScopeContext bound on current thread; authorizeAndResolveAccessScope must run before maskQueryResponseDtos");
+            }
+            if (responses == null || responses.isEmpty()) {
+                return List.of();
+            }
+            List<DetachedDtoMaskingResult> maskedList = authorizationSeam.projectAndMaskQueryResults(
+                    queryCtx,
+                    responses,
+                    fieldSchemas
+            );
+            List<ResponseDTO> converted = new ArrayList<>(maskedList.size());
+            for (DetachedDtoMaskingResult m : maskedList) {
+                converted.add(objectMapper.convertValue(m.detachedProjection(), responseType));
+            }
+            return List.copyOf(converted);
+        } finally {
+            activeQueryContext.remove();
+        }
+    }
+
+    /** Returns the currently bound {@link AuthorizedQueryScopeContext} on this thread, or {@code null}. */
+    AuthorizedQueryScopeContext currentQueryScopeContext() {
+        return activeQueryContext.get();
+    }
+
+    /** Restores a previously resolved {@link AuthorizedQueryScopeContext} on the current thread ({@code P10.16-R02}). */
+    void restoreQueryScopeContext(AuthorizedQueryScopeContext queryCtx) {
+        if (queryCtx != null) {
+            activeQueryContext.set(queryCtx);
+        }
+    }
+
+    /** Clears only the per-item mutation context while preserving {@code activeQueryContext} ({@code P10.16-R02}). */
+    void clearPerItemMutationContext() {
+        activeMutationContext.remove();
+        mutationReadyForResponseMasking.remove();
+    }
+
+    /**
+     * Evaluates collection-level {@code SEARCH} admission and {@code DataScopePlan} for a custom
+     * bulk action {@link DecisionPointDescriptor} ({@code P10.16-R02}).
+     */
+    AuthorizedQueryScopeContext evaluateBulkActionSearchScope(
+            DecisionPointDescriptor actionDecisionPoint,
+            String factContractDigest,
+            Set<String> incomingHeaderNames,
+            Map<String, Object> resolvedSubjectFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            JpaDataScopeAdapter jpaDataScopeAdapter,
+            String hardScopeJpql,
+            Map<String, Object> hardScopeParams
+    ) {
+        return authorizationSeam.authorizeAndCompileJpaQueryScope(
+                actionDecisionPoint,
+                factContractDigest,
+                incomingHeaderNames == null ? Set.of() : incomingHeaderNames,
+                resolvedSubjectFacts,
+                factStatuses,
+                Map.of(),
+                List.of(),
+                jpaDataScopeAdapter,
+                hardScopeJpql,
+                hardScopeParams,
+                row -> true
+        );
+    }
+
+    /**
+     * Evaluates live {@code TARGET} authorization via {@link MetadataResourceAuthorizationSeam}
+     * for non-persistent reactive determinations and AI context projections, returning the live
+     * OPA {@link MaskDirective}s and dynamically value-denied attributes ({@code Fase P10.6},
+     * {@code P10.6-R05}).
+     */
+    TargetReadProjectionEvaluation authorizeTargetEntityProjection(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            Map<String, Object> trustedTargetFacts,
+            Map<String, FactResolutionStatus> trustedFactStatuses
+    ) {
+        return authorizationSeam.evaluateTargetReadProjection(
+                decisionPoint,
+                factContractDigest,
+                trustedTargetFacts,
+                trustedFactStatuses
+        );
+    }
+
+    /**
+     * Evaluates live {@code TARGET} authorization via {@link MetadataResourceAuthorizationSeam}
+     * for non-persistent reactive determinations and AI context projections ({@code Fase P10.6}).
+     */
+    void assertTargetEntityAccess(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            Map<String, Object> trustedTargetFacts,
+            Map<String, FactResolutionStatus> trustedFactStatuses
+    ) {
+        authorizeTargetEntityProjection(
+                decisionPoint,
+                factContractDigest,
+                trustedTargetFacts,
+                trustedFactStatuses
+        );
+    }
+
+    /**
+     * Sanitizes and masks {@code Candidate.facts()} produced by {@code BulkDomainResourceAdapter.evaluate(...)}
+     * before returning the candidate to the bulk proposal evaluation layer, while leaving
+     * {@code Candidate.plan()} untouched for internal server-side confirmation ({@code P10.6-R01},
+     * {@code P11}, {@code P12}, {@code P15}, {@code P50}).
+     */
+    JsonNode sanitizeBulkCandidateFactsNode(
+            JsonNode rawFactsNode,
+            IntrospectedDtoGovernanceContract explicitContract
+    ) {
+        if (rawFactsNode == null || !rawFactsNode.isObject()) {
+            return rawFactsNode;
+        }
+        IntrospectedDtoGovernanceContract contract = explicitContract != null
+                ? explicitContract
+                : lastIntrospectedContract;
+        if (contract == null) {
+            return rawFactsNode;
+        }
+        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
+        AuthorizedQueryScopeContext queryCtx = activeQueryContext.get();
+
+        Set<String> deniedAttributes = new LinkedHashSet<>();
+        for (FieldUseEffectDirective dir : contract.baselineFieldUseDirectives()) {
+            if (dir.category() == FieldUseCategory.VALUE && dir.effect() == RuleEffect.DENY) {
+                deniedAttributes.add(dir.attributeId());
+            }
+        }
+        if (preCtx != null && preCtx.valueDeniedAttributeIds() != null) {
+            deniedAttributes.addAll(preCtx.valueDeniedAttributeIds());
+        } else if (queryCtx != null && queryCtx.valueDeniedAttributeIds() != null) {
+            deniedAttributes.addAll(queryCtx.valueDeniedAttributeIds());
+        }
+
+        List<MaskDirective> maskDirectives;
+        if (preCtx != null && preCtx.maskDirectives() != null) {
+            maskDirectives = preCtx.maskDirectives();
+        } else if (queryCtx != null && queryCtx.maskDirectives() != null) {
+            maskDirectives = queryCtx.maskDirectives();
+        } else {
+            maskDirectives = currentExportMaskDirectives();
+        }
+
+        if (rawFactsNode.has("resource") && rawFactsNode.get("resource").isObject()) {
+            ObjectNode copy = ((ObjectNode) rawFactsNode).deepCopy();
+            copy.set("resource", sanitizeBulkResourceObjectNode((ObjectNode) rawFactsNode.get("resource"), contract, deniedAttributes, maskDirectives));
+            return copy;
+        }
+        return sanitizeBulkResourceObjectNode((ObjectNode) rawFactsNode, contract, deniedAttributes, maskDirectives);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ObjectNode sanitizeBulkResourceObjectNode(
+            ObjectNode resourceNode,
+            IntrospectedDtoGovernanceContract contract,
+            Set<String> deniedAttributes,
+            List<MaskDirective> maskDirectives
+    ) {
+        Map<String, Object> rawMap = objectMapper.convertValue(resourceNode, Map.class);
+        DetachedDtoMaskingResult masked = maskingProcessor.projectAndMask(
+                rawMap,
+                contract.fieldSchemas(),
+                deniedAttributes,
+                maskDirectives
+        );
+        Map<String, Object> sanitizedMap = new LinkedHashMap<>(rawMap);
+        for (DtoFieldSchemaMetadata schema : contract.fieldSchemas()) {
+            String wireName = schema.wireFieldName();
+            if (rawMap.containsKey(wireName)) {
+                if (masked.detachedProjection().containsKey(wireName)) {
+                    sanitizedMap.put(wireName, masked.detachedProjection().get(wireName));
+                } else {
+                    sanitizedMap.remove(wireName);
+                }
+            }
+        }
+        return objectMapper.valueToTree(sanitizedMap);
+    }
+
+    /**
+     * Fulfills {@code BEFORE_COMMIT_OUTBOX} obligations when a mutation completed {@code afterUpdate}
+     * without disclosing a response DTO (for example, the prepared confirmation fast path in
+     * {@code AbstractBaseResourceService.bulkDomainAdapter.update(...)}) ({@code Fase P10.5}, {@code P19}).
+     */
+    void completePendingMutationOutboxIfNotDisclosed() {
+        AuthorizedPreMutationContext preCtx = activeMutationContext.get();
+        if (preCtx != null && Boolean.TRUE.equals(mutationReadyForResponseMasking.get())) {
+            try {
+                authorizationSeam.completePostDeleteOutbox(preCtx);
+            } finally {
+                activeMutationContext.remove();
+                mutationReadyForResponseMasking.remove();
+            }
+        }
+    }
+
+    /**
+     * Clears transient query/mutation contexts while preserving {@code activeExportMaskDirectives}
+     * and {@code pendingDeleteContexts} until transaction completion.
+     */
+    void clearTransientRequestContexts() {
+        activeQueryContext.remove();
+        activeMutationContext.remove();
+        mutationReadyForResponseMasking.remove();
+        activeExtractedQueryFieldUses.remove();
+    }
+
+    /**
+     * Binds automatically extracted {@link FieldUseCategory#FILTER} and {@link FieldUseCategory#SORT}
+     * uses for the duration of {@code action} with deterministic {@code finally} cleanup
+     * ({@code Fase P10.15-A}).
+     */
+    public <T> T executeWithExtractedQueryFieldUses(
+            Map<FieldUseCategory, Set<String>> extractedUses,
+            java.util.function.Supplier<T> action
+    ) {
+        Objects.requireNonNull(action, "action is required");
+        if (extractedUses == null || extractedUses.isEmpty()) {
+            return action.get();
+        }
+        Map<FieldUseCategory, Set<String>> previous = activeExtractedQueryFieldUses.get();
+        activeExtractedQueryFieldUses.set(mergeFieldUseMaps(previous, extractedUses));
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) {
+                activeExtractedQueryFieldUses.remove();
+            } else {
+                activeExtractedQueryFieldUses.set(previous);
+            }
+        }
+    }
+
+    /**
+     * Merges caller-supplied {@code requestedQueryFieldUses} with any runtime-extracted
+     * {@code FILTER}/{@code SORT} uses bound on the current thread ({@code Fase P10.15-A}).
+     */
+    public Map<FieldUseCategory, Set<String>> mergeWithExtractedQueryFieldUses(
+            Map<FieldUseCategory, Set<String>> callerUses
+    ) {
+        Map<FieldUseCategory, Set<String>> extracted = activeExtractedQueryFieldUses.get();
+        return mergeFieldUseMaps(callerUses, extracted);
+    }
+
+    private static Map<FieldUseCategory, Set<String>> mergeFieldUseMaps(
+            Map<FieldUseCategory, Set<String>> first,
+            Map<FieldUseCategory, Set<String>> second
+    ) {
+        if ((first == null || first.isEmpty()) && (second == null || second.isEmpty())) {
+            return Map.of();
+        }
+        if (first == null || first.isEmpty()) {
+            return second;
+        }
+        if (second == null || second.isEmpty()) {
+            return first;
+        }
+        Map<FieldUseCategory, Set<String>> merged = new LinkedHashMap<>();
+        for (Map.Entry<FieldUseCategory, Set<String>> e : first.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null && !e.getValue().isEmpty()) {
+                merged.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
+            }
+        }
+        for (Map.Entry<FieldUseCategory, Set<String>> e : second.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null && !e.getValue().isEmpty()) {
+                merged.computeIfAbsent(e.getKey(), k -> new LinkedHashSet<>()).addAll(e.getValue());
+            }
+        }
+        Map<FieldUseCategory, Set<String>> immutable = new LinkedHashMap<>();
+        for (Map.Entry<FieldUseCategory, Set<String>> e : merged.entrySet()) {
+            immutable.put(e.getKey(), Set.copyOf(e.getValue()));
+        }
+        return Map.copyOf(immutable);
+    }
+
+    /** Returns {@code true} if a pre-mutation context is currently bound on this thread. */
+    public boolean hasActiveMutationContext() {
+        return activeMutationContext.get() != null;
+    }
+
+    /** Clears any thread-local query or mutation authorization context. */
+    public void clearContext() {
+        activeQueryContext.remove();
+        activeMutationContext.remove();
+        mutationReadyForResponseMasking.remove();
+        activeExportMaskDirectives.remove();
+        activeExportValueDeniedAttributeIds.remove();
+        pendingDeleteContexts.remove();
+        activeExtractedQueryFieldUses.remove();
+    }
+}
