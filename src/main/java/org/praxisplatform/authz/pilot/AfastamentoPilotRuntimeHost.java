@@ -46,11 +46,11 @@ import org.praxisplatform.authz.enforcement.writeintent.DtoWriteIntentExtractor;
 import org.praxisplatform.authz.enforcement.writeintent.FieldWriteAuthorizer;
 
 /**
- * Showcase runtime host for the Ergon {@code Afastamento} authorization pilot ({@code P01..P26},
+ * Showcase runtime host for the Workforce {@code Afastamento} authorization pilot ({@code P01..P26},
  * {@code P29}, {@code P40}, {@code P42}, {@code P50}).
  *
  * <p>Demonstrates end-to-end execution of the 15-step pipeline without modifying frozen files in
- * {@code praxis-metadata-starter}, {@code praxis-config-starter}, or {@code praxis-ergon-showcase}:</p>
+ * {@code praxis-metadata-starter}, {@code praxis-config-starter}, or {@code praxis-workforce-showcase}:</p>
  * <ul>
  *   <li>Unified query surface across {@code list}, {@code total}, {@code byIds}, {@code includeIds},
  *       {@code cursor}, and {@code lookup} with mandatory hard-scope + {@link DataScopePlan} intersection;</li>

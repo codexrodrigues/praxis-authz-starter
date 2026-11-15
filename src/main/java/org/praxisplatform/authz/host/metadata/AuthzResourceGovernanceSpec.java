@@ -225,7 +225,7 @@ public final class AuthzResourceGovernanceSpec<E> {
      * manual boilerplate.
      *
      * @param <E> JPA entity type
-     * @param serviceKey owning microservice/host key (e.g. {@code "praxis-ergon-showcase"})
+     * @param serviceKey owning microservice/host key (e.g. {@code "praxis-workforce-showcase"})
      * @param tenantFieldName tenant hard-scope field path on {@code entityClass} (e.g. {@code "empCodigo"})
      * @param entityClass JPA entity class
      * @param responseDtoClass resource {@code ResponseDTO} class
@@ -1087,7 +1087,7 @@ public final class AuthzResourceGovernanceSpec<E> {
         }
 
         /**
-         * Configures the owning microservice/host {@code serviceKey} (e.g. {@code "praxis-ergon-showcase"}),
+         * Configures the owning microservice/host {@code serviceKey} (e.g. {@code "praxis-workforce-showcase"}),
          * enabling automatic derivation of {@link FactContract}, {@link QueryableResourceProjection},
          * and {@link DecisionPointDescriptor} when not explicitly supplied ({@code Fase P10.14}).
          */

@@ -65,9 +65,9 @@ import org.praxisplatform.authz.opa.compiler.CompiledRegoUnit;
 import org.praxisplatform.authz.opa.compiler.RegoV1PolicyCompiler;
 
 /**
- * Provides canonical, ready-to-verify authorization blueprints for both the Ergon
+ * Provides canonical, ready-to-verify authorization blueprints for both the Workforce
  * {@code Afastamento} showcase pilot (dual-scope cedente/cessionário, sensitive health CID masking,
- * selective write protection) and generic non-Ergon hosts ({@code P22}).
+ * selective write protection) and generic non-Workforce hosts ({@code P22}).
  */
 public record AfastamentoAuthzPilotBlueprint(
         String serviceKey,
@@ -85,7 +85,7 @@ public record AfastamentoAuthzPilotBlueprint(
 ) {
 
     /**
-     * Builds the canonical Ergon {@code Afastamento} pilot blueprint ({@code serviceKey = "praxis-ergon-showcase"},
+     * Builds the canonical Workforce {@code Afastamento} pilot blueprint ({@code serviceKey = "praxis-workforce-showcase"},
      * {@code resourceKey = "human-resources.afastamentos"}).
      */
     public static AfastamentoAuthzPilotBlueprint createErgonAfastamentoBlueprint() {
@@ -97,7 +97,7 @@ public record AfastamentoAuthzPilotBlueprint(
     }
 
     /**
-     * Builds a host-neutral authorization blueprint without any Ergon classes or naming conventions,
+     * Builds a host-neutral authorization blueprint without any Workforce classes or naming conventions,
      * proving cross-host contract reuse ({@code P22}).
      */
     public static AfastamentoAuthzPilotBlueprint createHostBlueprint(
