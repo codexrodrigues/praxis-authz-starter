@@ -60,7 +60,7 @@ A [**Praxis Platform**](https://praxisui.dev/) é uma **plataforma semanticament
 
 ## Que Problema Corporativo Este Starter Resolve?
 
-Quando um time adota um framework CRUD metadata-driven como o [`praxis-metadata-starter`](https://github.com/codexrodrigues/praxis-metadata-starter) (que gera automaticamente listagem paginada, filtros avançados, ordenação, `/stats/*`, exportação CSV/Excel, *option sources*, determinações reativas, operações em lote e superfícies para agentes de IA), surge o desafio crítico de segurança em escala corporativa:
+Quando um time adota um motor semântico de recursos metadata-driven como o [`praxis-metadata-starter`](https://github.com/codexrodrigues/praxis-metadata-starter) (que gera automaticamente listagem paginada, filtros avançados, ordenação, `/stats/*`, exportação CSV/Excel, *option sources*, determinações reativas, operações em lote e superfícies para agentes de IA), surge o desafio crítico de segurança em escala corporativa:
 
 1. **Superfície rica = múltiplos vetores de vazamento se protegidos um a um:** Sem proteção centralizada na raiz de `AbstractBaseResourceService`, proteger o `GET /items` manualmente ainda deixa escapar dados por `/export`, `/stats/group-by`, `/options/filter`, descoberta de ações `@WorkflowAction`, fluxos em lote ou reentrância interna entre serviços.
 2. **Duplicação gigantesca de código entre metadados e segurança (*Blueprint Bloat*):** Se o desenvolvedor precisasse declarar manualmente dezenas de mapas de campos filtráveis, paths JPA, classes de linhagem e pontos de decisão depois de já tê-los anotado no recurso Praxis, a manutenção dobraria.
