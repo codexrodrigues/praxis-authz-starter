@@ -1,6 +1,8 @@
 package org.praxisplatform.authz.host.metadata;
 
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -9,7 +11,8 @@ import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
 
 /**
  * Immutable per-request caller context consumed by {@link AbstractAuthzGovernedReadOnlyResourceService},
- * {@link AbstractAuthzGovernedResourceService}, and {@link AuthzResourceOperationAvailabilityProvider}
+ * {@link AbstractAuthzGovernedResourceService}, {@link AuthzResourceGovernanceInterceptor}, and
+ * {@link AuthzResourceOperationAvailabilityProvider}
  * ({@code Fases P10.8..P10.9}, {@code CC01}, {@code CC02}, {@code P01}, {@code P02}, {@code P03}).
  *
  * @param tenantId authoritative tenant identifier for hard-scope isolation
@@ -17,8 +20,8 @@ import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
  * @param factStatuses resolution statuses for each fact key (defaults to {@link FactResolutionStatus#PRESENT})
  * @param incomingHeaderNames incoming HTTP header names inspected for anti-spoofing guards
  * @param requestedQueryFieldUses requested query field uses ({@code FILTER}, {@code SORT}, {@code GROUP})
- * @param callerMatchesCedente optional explicit {@code Cedente} custody flag (when {@code null}, derived by {@link AuthzResourceGovernanceSpec})
- * @param callerMatchesCessionario optional explicit {@code Cessionário} custody flag (when {@code null}, derived by {@link AuthzResourceGovernanceSpec})
+ * @param callerMatchesCedente optional explicit origin custody flag (when {@code null}, derived by {@link AuthzResourceGovernanceSpec})
+ * @param callerMatchesCessionario optional explicit destination custody flag (when {@code null}, derived by {@link AuthzResourceGovernanceSpec})
  */
 public record AuthzCallerContext(
         String tenantId,
@@ -29,6 +32,15 @@ public record AuthzCallerContext(
         Boolean callerMatchesCedente,
         Boolean callerMatchesCessionario
 ) {
+
+    /** Canonical subject fact key carrying multi-organization hard-scope identifiers. */
+    public static final String FACT_AUTHORIZED_ORGANIZATION_IDS = "subject.authorizedOrganizationIds";
+
+    /** Canonical subject fact key carrying organizational unit grants. */
+    public static final String FACT_ORGANIZATION_UNIT_IDS = "subject.organizationUnitIds";
+
+    /** Canonical environment fact key indicating a read-only multi-organization consolidation scope. */
+    public static final String FACT_READ_ONLY_CONSOLIDATION_SCOPE = "env.readOnlyConsolidationScope";
 
     /** Canonical compact constructor enforcing required invariants and defensive copies. */
     public AuthzCallerContext {
@@ -99,19 +111,19 @@ public record AuthzCallerContext(
     }
 
     /**
-     * Convenience factory for a caller context with explicit dual-scope custody flags.
+     * Neutral factory for a caller context with explicit origin and destination dual-scope custody flags.
      *
      * @param tenantId authoritative tenant ID
      * @param subjectAndEnvironmentFacts authoritative subject and environment facts
-     * @param callerMatchesCedente whether caller holds {@code Cedente} custody
-     * @param callerMatchesCessionario whether caller holds {@code Cessionário} custody
+     * @param callerMatchesOrigin whether caller holds authoritative origin custody
+     * @param callerMatchesDestination whether caller holds delegated destination custody
      * @return immutable {@link AuthzCallerContext}
      */
-    public static AuthzCallerContext of(
+    public static AuthzCallerContext ofOriginAndDestination(
             String tenantId,
             Map<String, Object> subjectAndEnvironmentFacts,
-            boolean callerMatchesCedente,
-            boolean callerMatchesCessionario
+            boolean callerMatchesOrigin,
+            boolean callerMatchesDestination
     ) {
         return new AuthzCallerContext(
                 tenantId,
@@ -119,27 +131,78 @@ public record AuthzCallerContext(
                 Map.of(),
                 Set.of(),
                 Map.of(),
-                callerMatchesCedente,
-                callerMatchesCessionario
+                callerMatchesOrigin,
+                callerMatchesDestination
         );
     }
 
     /**
-     * Returns a copy of this context with explicit {@code Cedente} and {@code Cessionário} custody flags.
+     * Legacy convenience factory for dual-scope custody flags; prefer {@link #ofOriginAndDestination}.
+     */
+    public static AuthzCallerContext of(
+            String tenantId,
+            Map<String, Object> subjectAndEnvironmentFacts,
+            boolean callerMatchesOrigin,
+            boolean callerMatchesDestination
+    ) {
+        return ofOriginAndDestination(
+                tenantId,
+                subjectAndEnvironmentFacts,
+                callerMatchesOrigin,
+                callerMatchesDestination
+        );
+    }
+
+    /** Neutral accessor for whether the caller explicitly holds origin custody. */
+    public Boolean callerMatchesOrigin() {
+        return callerMatchesCedente;
+    }
+
+    /** Neutral accessor for whether the caller explicitly holds destination custody. */
+    public Boolean callerMatchesDestination() {
+        return callerMatchesCessionario;
+    }
+
+    /**
+     * Returns a copy of this context with explicit origin and destination custody flags.
      *
-     * @param matchesCedente whether caller holds {@code Cedente} custody
-     * @param matchesCessionario whether caller holds {@code Cessionário} custody
+     * @param matchesOrigin whether caller holds origin custody
+     * @param matchesDestination whether caller holds destination custody
      * @return updated immutable {@link AuthzCallerContext}
      */
-    public AuthzCallerContext withDualScopeCustody(boolean matchesCedente, boolean matchesCessionario) {
+    public AuthzCallerContext withDualScopeCustody(boolean matchesOrigin, boolean matchesDestination) {
         return new AuthzCallerContext(
                 tenantId,
                 subjectAndEnvironmentFacts,
                 factStatuses,
                 incomingHeaderNames,
                 requestedQueryFieldUses,
-                matchesCedente,
-                matchesCessionario
+                matchesOrigin,
+                matchesDestination
+        );
+    }
+
+    /**
+     * Returns a copy of this context populated with multi-organization hard-scope grants
+     * ({@link #FACT_AUTHORIZED_ORGANIZATION_IDS}).
+     *
+     * @param organizationIds authorized organization IDs
+     * @return updated immutable {@link AuthzCallerContext}
+     */
+    public AuthzCallerContext withAuthorizedOrganizations(Collection<?> organizationIds) {
+        Map<String, Object> mergedFacts = new LinkedHashMap<>(subjectAndEnvironmentFacts);
+        Map<String, FactResolutionStatus> mergedStatuses = new LinkedHashMap<>(factStatuses);
+        List<?> cleanList = organizationIds == null ? List.of() : List.copyOf(organizationIds);
+        mergedFacts.put(FACT_AUTHORIZED_ORGANIZATION_IDS, cleanList);
+        mergedStatuses.put(FACT_AUTHORIZED_ORGANIZATION_IDS, FactResolutionStatus.PRESENT);
+        return new AuthzCallerContext(
+                tenantId,
+                mergedFacts,
+                mergedStatuses,
+                incomingHeaderNames,
+                requestedQueryFieldUses,
+                callerMatchesCedente,
+                callerMatchesCessionario
         );
     }
 

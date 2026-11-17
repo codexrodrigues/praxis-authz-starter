@@ -283,6 +283,43 @@ AuthzPolicySimulationHarness.forResource(spec, bundle, AfastamentoResponseDTO.cl
 ```
 
 ---
+## 6. Declarative Annotations (`@Authz*`) and Automatic `@DomainGovernance` Masking
+
+Instead of hand-coding `FactContract`, `DualScopeDelegationSpec`, and JSON-Logic rule boilerplate for every resource, hosts can declare governance directly with annotations from `praxis-authz-contracts`:
+
+| Annotation | Target | Purpose |
+| :--- | :--- | :--- |
+| `@AuthzTenantScope` | Service, Controller, Entity, or field/getter | Configures tenant/organization isolation (`TENANT_ONLY`, `ORGANIZATIONAL_UNIT`, `AUTHENTICATED_SHARED`), `tenantField`, `resourceFactPath`, `subjectFactPath`, and optional bulk-without-scope controls. |
+| `@AuthzScopeAnchor` | Entity field/getter or DTO field | Marks mandatory scope anchor attributes (`requiredOnCreate`, `forbidClearOnUpdate`, `immutableAfterCreate`). |
+| `@AuthzCustodyPartition` | Entity field/getter, Service, or Controller | Declares origin vs destination dual-custody split (`AuthzCustodyRole.ORIGIN` / `DESTINATION`, `AuthzDelegationSplitMode`) and field write partitions. |
+| `@AuthzMask` | Response DTO field/record component or Service/Entity | Declares explicit `MaskContributionSpec` masking (`AuthzMaskStrategy`, `EvaluationMode`, optional target `surfaces`). |
+| `@AuthzActionRule` | `@WorkflowAction` / `@UiSurface` method or type | Declares `requiredRoles`, `conditionFactPath` / `conditionAllowedValues`, `conditionJsonLogic`, `allowedWriteAttributes`, `reasonCode`, and audit obligations. |
+
+When introspecting DTOs via `MetadataDtoGovernanceIntrospector`, sensitive/restricted/confidential fields annotated with `@DomainGovernance` automatically derive baseline `MaskContributionSpec` directives (`REDACT_CONSTANT("***")` for `String` fields and `NULLIFY` for nullable non-`String` reference fields) or fail-closed `FieldUseCategory.VALUE` + `RuleEffect.DENY` (`OMIT_BY_FIELD_USE_DENY`) for primitive or non-nullable non-`String` fields, while `SECRET` and `CREDENTIAL` classifications also enforce `VALUE + DENY`. Explicit `@AuthzMask` declarations override derived masks per `attributeId`.
+
+With an introspected `AuthzResourceGovernanceSpec`, call `AuthzHostPolicyBootstrapBuilder.addAnnotatedResource(spec)` (or `addAnnotatedResources(specs)`) to synthesize zero-config primary scope policies, field-masking policies, workflow action policies, and UI surface policies automatically (keeping disjunctive `"or"` nodes at the JSON-Logic root for `RegoV1PolicyCompiler`).
+
+---
+
+## 7. Zero-Boilerplate Interception, Availability Rules, Multi-Organization Hard Scope, and `AUTHZ-HOST-010`
+
+`PraxisAuthzHostBridgeAutoConfiguration` automatically registers platform beans with `@ConditionalOnMissingBean` and `@ConditionalOnClass`:
+
+- **`AuthzResourceGovernanceInterceptor`**: Implements `ResourceGovernanceInterceptor` for plain Praxis `AbstractBaseQueryResourceService` and `AbstractBaseResourceService` services without requiring inheritance from `AbstractAuthzGovernedReadOnlyResourceService` or `AbstractAuthzGovernedResourceService` (which are automatically bypassed to prevent double enforcement). It resolves registered `AuthzResourceGovernanceSpec` beans or lazily introspects `@Authz*` + `@ApiResource` annotations, enforcing query hard scopes, OPA `DataScopePlan` pushdown, entity access checks, export/stats field-use filtering, `beforeMutation` (`WriteIntent` + immutable scope anchors), `afterMutationBeforeCommit` (`BEFORE_COMMIT_OUTBOX`), and detached DTO response masking. Set `praxis.authz.interceptor.fail-closed-unconfigured-services=true` to reject any plain service lacking both a spec bean and `@AuthzTenantScope`.
+- **`AuthzResourceOperationAvailabilityRule` + `@Primary CompositeResourceOperationAvailabilityEvaluator`**: Wraps `AuthzResourceOperationAvailabilityProvider` as an ordered `ResourceOperationAvailabilityRule` (`DEFAULT_ORDER = Ordered.HIGHEST_PRECEDENCE + 300`) so Praxis authorization decisions combine cleanly under deny-wins semantics with host-specific availability rules.
+- **`MultiOrganizationHardScopeResolver` (`HardScopeResolver`)**: Default hard-scope resolver supporting single-tenant (`= :__praxis_hard_tenant_id`), multi-organization (`IN :__praxis_hard_tenant_ids`), fail-closed empty organization sets, shared catalogs (`1 = 1` when `AUTHENTICATED_SHARED`), consolidation read-only write guards (`FACT_READ_ONLY_CONSOLIDATION_SCOPE`), and `immutableAfterCreate` anchor checks on updates.
+- **Resolving `AUTHZ-HOST-010`**: Use `AuthzHostReadinessReviewer.reviewInterceptorBoundServices(...)` or the 4-argument `reviewAll(...)` alongside `reviewReadOnlyService` / `reviewMutableService`. Declare `allowedWriteAttributes` via `@AuthzActionRule` (or keep transition-only actions without `FIELD_WRITE` when `allowedWriteAttributes = {}`), type command payloads cleanly for DTO write-intent discovery, and keep `HostRuntimePolicyCoordinates` / `AuthzHostPolicyBootstrapBuilder.addAnnotatedResource(...)` aligned with all custom action and surface decision points.
+
+---
+
+## 8. Fail-Closed Agent Bridge (`PraxisAuthzAgentBridgeAutoConfiguration`)
+
+When AI agents or tool runtimes operate over Praxis resources in the same Spring Boot application, `PraxisAuthzAgentBridgeAutoConfiguration` wires `AuthzAgentAuthorizationBridge` and `AuthzAgentThreadContextPropagator` using the host's configured `AuthzCallerContextProvider`, `MetadataResourceAuthorizationSeam`, and `AuthzResourceOperationAvailabilityProvider`:
+
+- Agent invocations never run with ambient elevated privilege: every tool or catalog execution carries an explicit, fail-closed caller context (`AuthzCallerContext`).
+- Advisory discovery checks (HATEOAS / action availability) remain separated from runtime target/write authorization enforcement so stale discovery metadata cannot bypass live policy updates.
+
+---
 
 ## 9. Clonagem Assistida (`DuplicateDraft`) e Exportação Governada (`Fase P10.17`)
 

@@ -69,7 +69,7 @@ import org.praxisplatform.authz.opa.compiler.RegoV1PolicyCompiler;
  * {@code Afastamento} showcase pilot (dual-scope cedente/cessionário, sensitive health CID masking,
  * selective write protection) and generic non-Workforce hosts ({@code P22}).
  */
-public record AfastamentoAuthzPilotBlueprint(
+public record WorkforceLeaveAuthzPilotBlueprint(
         String serviceKey,
         String resourceKey,
         DecisionPointDescriptor decisionPoint,
@@ -88,11 +88,11 @@ public record AfastamentoAuthzPilotBlueprint(
      * Builds the canonical Workforce {@code Afastamento} pilot blueprint ({@code serviceKey = "praxis-workforce-showcase"},
      * {@code resourceKey = "human-resources.afastamentos"}).
      */
-    public static AfastamentoAuthzPilotBlueprint createErgonAfastamentoBlueprint() {
+    public static WorkforceLeaveAuthzPilotBlueprint createWorkforceLeaveBlueprint() {
         return createHostBlueprint(
-                "praxis-ergon-showcase",
+                "praxis-workforce-showcase",
                 "human-resources.afastamentos",
-                "ergon.afastamentos"
+                "workforce.leaves"
         );
     }
 
@@ -100,7 +100,7 @@ public record AfastamentoAuthzPilotBlueprint(
      * Builds a host-neutral authorization blueprint without any Workforce classes or naming conventions,
      * proving cross-host contract reuse ({@code P22}).
      */
-    public static AfastamentoAuthzPilotBlueprint createHostBlueprint(
+    public static WorkforceLeaveAuthzPilotBlueprint createHostBlueprint(
             String serviceKey,
             String resourceKey,
             String attributePrefix
@@ -434,7 +434,7 @@ public record AfastamentoAuthzPilotBlueprint(
                 lineageEntries
         );
 
-        return new AfastamentoAuthzPilotBlueprint(
+        return new WorkforceLeaveAuthzPilotBlueprint(
                 serviceKey,
                 resourceKey,
                 dp,

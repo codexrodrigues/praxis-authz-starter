@@ -13,7 +13,7 @@
 
     <groupId>io.github.codexrodrigues</groupId>
     <artifactId>praxis-authz-starter</artifactId>
-    <version>0.1.0-beta.1</version>
+    <version>0.1.0-beta.2-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>Praxis Authz Spring Boot Starter</name>
@@ -48,9 +48,9 @@
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-boot.repackage.skip>true</spring-boot.repackage.skip>
-        <praxis-authz.version>${project.version}</praxis-authz.version>
-        <praxis-metadata.version>8.0.0-rc.191</praxis-metadata.version>
-        <praxis-config.version>0.1.0-rc.176</praxis-config.version>
+        <praxis-authz.version>0.1.0-beta.2</praxis-authz.version>
+        <praxis-metadata.version>8.0.0-rc.193</praxis-metadata.version>
+        <praxis-config.version>0.1.0-rc.179</praxis-config.version>
     </properties>
 
     <dependencies>

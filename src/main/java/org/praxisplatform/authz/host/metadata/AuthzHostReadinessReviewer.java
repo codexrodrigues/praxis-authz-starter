@@ -654,7 +654,7 @@ public final class AuthzHostReadinessReviewer {
             // AUTHZ-HOST-004: DualScopeDelegationSpec coherence
             DualScopeDelegationSpec dualScope = spec.dualScopeDelegationSpec();
             if (dualScope != null) {
-                if (!spec.hasDeclarativeCedenteCustody() || !spec.hasDeclarativeCessionarioCustody()) {
+                if (!spec.hasDeclarativeOriginCustody() || !spec.hasDeclarativeDestinationCustody()) {
                     issues.add(new ReadinessIssue(
                             "AUTHZ-HOST-004-MISSING-DECLARATIVE-CUSTODY-RULES",
                             Severity.ERROR,
@@ -666,11 +666,11 @@ public final class AuthzHostReadinessReviewer {
                     ));
                 }
 
-                Set<String> cedenteAttrs = dualScope.cedenteExclusiveWriteAttributes() != null
-                        ? dualScope.cedenteExclusiveWriteAttributes()
+                Set<String> cedenteAttrs = dualScope.originExclusiveWriteAttributes() != null
+                        ? dualScope.originExclusiveWriteAttributes()
                         : Set.of();
-                Set<String> cessionarioAttrs = dualScope.cessionarioAllowedWriteAttributes() != null
-                        ? dualScope.cessionarioAllowedWriteAttributes()
+                Set<String> cessionarioAttrs = dualScope.destinationAllowedWriteAttributes() != null
+                        ? dualScope.destinationAllowedWriteAttributes()
                         : Set.of();
 
                 for (String attr : cedenteAttrs) {
@@ -750,11 +750,11 @@ public final class AuthzHostReadinessReviewer {
                 if (spec.stateFieldName() != null) {
                     checkEntityPath(issues, resourceKey, serviceName, entityClass, "stateFieldName", spec.stateFieldName());
                 }
-                if (spec.cedenteEntityFieldPath() != null) {
-                    checkEntityPath(issues, resourceKey, serviceName, entityClass, "cedenteEntityFieldPath", spec.cedenteEntityFieldPath());
+                if (spec.originEntityFieldPath() != null) {
+                    checkEntityPath(issues, resourceKey, serviceName, entityClass, "originEntityFieldPath", spec.originEntityFieldPath());
                 }
-                if (spec.cessionarioEntityFieldPath() != null) {
-                    checkEntityPath(issues, resourceKey, serviceName, entityClass, "cessionarioEntityFieldPath", spec.cessionarioEntityFieldPath());
+                if (spec.destinationEntityFieldPath() != null) {
+                    checkEntityPath(issues, resourceKey, serviceName, entityClass, "destinationEntityFieldPath", spec.destinationEntityFieldPath());
                 }
                 for (QueryAdapterFieldBinding binding : spec.fieldBindings()) {
                     String jpaPath = binding.nativeJpaPath();
@@ -2110,6 +2110,162 @@ public final class AuthzHostReadinessReviewer {
             return elem != null ? elem : Object.class;
         }
         return rawType;
+    }
+
+    /**
+     * Reviews plain Spring Data / Praxis {@link org.praxisplatform.uischema.service.base.BaseResourceQueryService}
+     * services governed via {@code AuthzResourceGovernanceInterceptor} alongside their resolved or
+     * annotation-introspected {@link AuthzResourceGovernanceSpec}s ({@code Wave 1.4B}).
+     *
+     * @param services interceptor-governed services (subclasses of {@code AbstractAuthzGoverned*} are skipped)
+     * @param specsByResourceKey optional pre-registered specs keyed by {@code resourceKey}
+     * @return readiness report covering {@code AUTHZ-HOST-001..014}
+     */
+    public ReadinessReport reviewInterceptorBoundServices(
+            Collection<? extends org.praxisplatform.uischema.service.base.BaseResourceQueryService<?, ?, ?>> services,
+            Map<String, AuthzResourceGovernanceSpec<?>> specsByResourceKey
+    ) {
+        List<ReadinessIssue> allIssues = new ArrayList<>();
+        int count = 0;
+        if (services != null) {
+            Map<String, AuthzResourceGovernanceSpec<?>> lookup = specsByResourceKey == null
+                    ? Map.of()
+                    : specsByResourceKey;
+            for (var service : services) {
+                if (service == null
+                        || service instanceof AbstractAuthzGovernedReadOnlyResourceService<?, ?, ?, ?>
+                        || service instanceof AbstractAuthzGovernedResourceService<?, ?, ?, ?, ?, ?>) {
+                    continue;
+                }
+                count++;
+                Class<?> targetClass = AopUtils.getTargetClass(service);
+                String resourceKey = safeResolveResourceKey(service::getResourceKey);
+                AuthzResourceGovernanceSpec<?> spec = lookup.get(resourceKey);
+                Class<?>[] resolvedTypes = resolveServiceGenericTypes(targetClass);
+                Class<?> entityClass = resolvedTypes[0];
+                Class<?> responseDto = resolvedTypes[1];
+                Class<?> createDto = resolvedTypes[2];
+                Class<?> updateDto = resolvedTypes[3];
+                Class<?> filterDto = resolvedTypes[4];
+                if (spec == null && entityClass != null) {
+                    spec = tryAutoIntrospectServiceSpec(resourceKey, targetClass, entityClass, responseDto, createDto, updateDto);
+                }
+                if (spec == null) {
+                    allIssues.add(new ReadinessIssue(
+                            "AUTHZ-HOST-001-MISSING-GOVERNANCE-SPEC",
+                            Severity.ERROR,
+                            resourceKey,
+                            targetClass.getSimpleName(),
+                            "AuthzResourceGovernanceSpec",
+                            "Interceptor-governed service '" + targetClass.getSimpleName()
+                                    + "' has no AuthzResourceGovernanceSpec or @AuthzTenantScope annotation.",
+                            "Annotate the resource with @AuthzTenantScope or register an AuthzResourceGovernanceSpec bean."
+                    ));
+                    continue;
+                }
+                StatsFieldRegistry statsReg = service.getStatsFieldRegistry();
+                var optReg = service.getOptionSourceRegistry();
+                ReadinessReport svcReport = reviewGovernanceSpec(
+                        spec,
+                        entityClass,
+                        responseDto,
+                        filterDto,
+                        createDto,
+                        updateDto,
+                        statsReg,
+                        null,
+                        optReg
+                );
+                allIssues.addAll(svcReport.issues());
+            }
+        }
+        return new ReadinessReport(count, List.copyOf(allIssues));
+    }
+
+    /**
+     * Reviews all explicit governed services AND interceptor-governed {@code BaseResourceQueryService}s
+     * in a single aggregated readiness report ({@code Wave 1.4B}).
+     */
+    public ReadinessReport reviewAll(
+            Collection<? extends AbstractAuthzGovernedReadOnlyResourceService<?, ?, ?, ?>> readOnlyServices,
+            Collection<? extends AbstractAuthzGovernedResourceService<?, ?, ?, ?, ?, ?>> mutableServices,
+            Collection<? extends org.praxisplatform.uischema.service.base.BaseResourceQueryService<?, ?, ?>> interceptorServices,
+            Map<String, AuthzResourceGovernanceSpec<?>> specsByResourceKey
+    ) {
+        ReadinessReport explicitReport = reviewAll(readOnlyServices, mutableServices);
+        ReadinessReport interceptorReport = reviewInterceptorBoundServices(interceptorServices, specsByResourceKey);
+        List<ReadinessIssue> merged = new ArrayList<>(explicitReport.issues().size() + interceptorReport.issues().size());
+        merged.addAll(explicitReport.issues());
+        merged.addAll(interceptorReport.issues());
+        return new ReadinessReport(
+                explicitReport.reviewedServiceCount() + interceptorReport.reviewedServiceCount(),
+                List.copyOf(merged)
+        );
+    }
+
+    private static Class<?>[] resolveServiceGenericTypes(Class<?> targetClass) {
+        Class<?> entityClass = null;
+        Class<?> responseDto = null;
+        Class<?> createDto = null;
+        Class<?> updateDto = null;
+        Class<?> filterDto = null;
+        ResolvableType mutableType = ResolvableType.forClass(targetClass)
+                .as(org.praxisplatform.uischema.service.base.AbstractBaseResourceService.class);
+        if (mutableType != ResolvableType.NONE) {
+            entityClass = mutableType.getGeneric(0).resolve();
+            responseDto = mutableType.getGeneric(1).resolve();
+            filterDto = mutableType.getGeneric(3).resolve();
+            createDto = mutableType.getGeneric(4).resolve();
+            updateDto = mutableType.getGeneric(5).resolve();
+        } else {
+            ResolvableType queryType = ResolvableType.forClass(targetClass)
+                    .as(AbstractBaseQueryResourceService.class);
+            if (queryType != ResolvableType.NONE) {
+                entityClass = queryType.getGeneric(0).resolve();
+                responseDto = queryType.getGeneric(1).resolve();
+                filterDto = queryType.getGeneric(3).resolve();
+            } else {
+                ResolvableType ifaceQuery = ResolvableType.forClass(targetClass)
+                        .as(org.praxisplatform.uischema.service.base.BaseResourceQueryService.class);
+                if (ifaceQuery != ResolvableType.NONE) {
+                    responseDto = ifaceQuery.getGeneric(0).resolve();
+                    filterDto = ifaceQuery.getGeneric(2).resolve();
+                }
+                ResolvableType ifaceCmd = ResolvableType.forClass(targetClass)
+                        .as(org.praxisplatform.uischema.service.base.BaseResourceCommandService.class);
+                if (ifaceCmd != ResolvableType.NONE) {
+                    createDto = ifaceCmd.getGeneric(2).resolve();
+                    updateDto = ifaceCmd.getGeneric(3).resolve();
+                }
+            }
+        }
+        return new Class<?>[] {entityClass, responseDto, createDto, updateDto, filterDto};
+    }
+
+    private static <E> AuthzResourceGovernanceSpec<E> tryAutoIntrospectServiceSpec(
+            String resourceKey,
+            Class<?> serviceClass,
+            Class<E> entityClass,
+            Class<?> responseDto,
+            Class<?> createDto,
+            Class<?> updateDto
+    ) {
+        if (!AnnotatedElementUtils.hasAnnotation(serviceClass, org.praxisplatform.authz.contracts.annotation.AuthzTenantScope.class)
+                && !AnnotatedElementUtils.hasAnnotation(entityClass, org.praxisplatform.authz.contracts.annotation.AuthzTenantScope.class)) {
+            return null;
+        }
+        return AuthzResourceGovernanceSpec.fromAnnotatedResource(
+                "praxis-host",
+                resourceKey,
+                null,
+                entityClass,
+                responseDto,
+                null,
+                createDto,
+                updateDto,
+                null,
+                serviceClass
+        );
     }
 
     private static String safeResolveResourceKey( java.util.function.Supplier<String> supplier) {

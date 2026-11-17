@@ -46,6 +46,14 @@ import java.util.UUID;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import org.praxisplatform.authz.catalog.FieldLineageCatalogEntry;
+import org.praxisplatform.authz.contracts.annotation.AuthzActionRule;
+import org.praxisplatform.authz.contracts.annotation.AuthzCustodyPartition;
+import org.praxisplatform.authz.contracts.annotation.AuthzCustodyRole;
+import org.praxisplatform.authz.contracts.annotation.AuthzDelegationSplitMode;
+import org.praxisplatform.authz.contracts.annotation.AuthzMask;
+import org.praxisplatform.authz.contracts.annotation.AuthzScopeAnchor;
+import org.praxisplatform.authz.contracts.annotation.AuthzTenantScope;
+import org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode;
 import org.praxisplatform.authz.contracts.context.ContextEvaluationPhase;
 import org.praxisplatform.authz.contracts.context.FactCardinality;
 import org.praxisplatform.authz.contracts.context.FactContract;
@@ -78,18 +86,22 @@ import org.praxisplatform.authz.contracts.decisionpoint.QueryableProjectionRef;
 import org.praxisplatform.authz.contracts.digest.CanonicalDigestCalculator;
 import org.praxisplatform.authz.contracts.digest.DigestDomainKind;
 import org.praxisplatform.authz.contracts.policy.DualScopeDelegationSpec;
+import org.praxisplatform.authz.contracts.policy.MaskContributionSpec;
 import org.praxisplatform.authz.enforcement.jpa.JpaDataScopeAdapter;
 import org.praxisplatform.authz.enforcement.jpa.QueryAdapterFieldBinding;
 import org.praxisplatform.authz.enforcement.jpa.RelationTraversalStrategy;
 import org.praxisplatform.authz.enforcement.masking.DtoFieldSchemaMetadata;
+import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector.DeclaredMaskSpec;
 import org.praxisplatform.uischema.action.ActionScope;
 import org.praxisplatform.uischema.annotation.ApiResource;
+import org.praxisplatform.uischema.annotation.DomainLineage;
 import org.praxisplatform.uischema.annotation.UiSurface;
 import org.praxisplatform.uischema.annotation.WorkflowAction;
 import org.praxisplatform.uischema.capability.ResourceStateSnapshot;
 import org.praxisplatform.uischema.filter.annotation.Filterable;
 import org.praxisplatform.uischema.service.base.ResourceFilterAccessScope;
 import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 
@@ -111,8 +123,8 @@ import org.springframework.web.bind.annotation.RequestMethod;
  *       {@link #verifyEntityAccessAllowed(Object, AuthzCallerContext, DataScopePlan)};</li>
  *   <li>Automatic target fact extraction ({@link #extractEntityTargetFacts(Object)}), entity state
  *       snapshot construction ({@link #toResourceStateSnapshot(Object)}), and dual-scope custody
- *       evaluation ({@link #isCallerCedente(Object, AuthzCallerContext)} /
- *       {@link #isCallerCessionario(Object, AuthzCallerContext)}) ({@code Fase P10.9}).</li>
+ *       evaluation ({@link #isCallerOrigin(Object, AuthzCallerContext)} /
+ *       {@link #isCallerDestination(Object, AuthzCallerContext)}) ({@code Fase P10.9}).</li>
  * </ul>
  *
  * @param <E> JPA entity type
@@ -122,19 +134,124 @@ public final class AuthzResourceGovernanceSpec<E> {
     /** Canonical parameter name used in generated JPQL hard-scope clauses. */
     public static final String HARD_TENANT_PARAM = "__praxis_hard_tenant_id";
 
+    /** Canonical parameter name used in generated JPQL multi-organization hard-scope clauses. */
+    public static final String HARD_TENANT_IDS_PARAM = MultiOrganizationHardScopeResolver.HARD_TENANT_IDS_PARAM;
+
     /** Internal snapshot metadata key storing the entity's tenant identifier. */
     public static final String SNAPSHOT_TENANT_META_KEY = "__authz.tenantId";
 
-    /** Internal snapshot metadata key storing the entity's Cedente custody anchor value. */
-    public static final String SNAPSHOT_CEDENTE_VALUE_META_KEY = "__authz.cedenteValue";
+    /** Internal snapshot metadata key storing the entity's origin custody anchor value. */
+    public static final String SNAPSHOT_ORIGIN_VALUE_META_KEY = "__authz.originValue";
 
-    /** Internal snapshot metadata key storing the entity's Cessionário custody anchor value. */
-    public static final String SNAPSHOT_CESSIONARIO_VALUE_META_KEY = "__authz.cessionarioValue";
+    /** Internal snapshot metadata key storing the entity's destination custody anchor value. */
+    public static final String SNAPSHOT_DESTINATION_VALUE_META_KEY = "__authz.destinationValue";
+
+    /**
+     * Backward-compatible constant alias for {@link #SNAPSHOT_ORIGIN_VALUE_META_KEY}.
+     *
+     * @deprecated Use {@link #SNAPSHOT_ORIGIN_VALUE_META_KEY}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
+    public static final String SNAPSHOT_CEDENTE_VALUE_META_KEY = SNAPSHOT_ORIGIN_VALUE_META_KEY;
+
+    /**
+     * Backward-compatible constant alias for {@link #SNAPSHOT_DESTINATION_VALUE_META_KEY}.
+     *
+     * @deprecated Use {@link #SNAPSHOT_DESTINATION_VALUE_META_KEY}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
+    public static final String SNAPSHOT_CESSIONARIO_VALUE_META_KEY = SNAPSHOT_DESTINATION_VALUE_META_KEY;
 
     /** Internal snapshot metadata key storing the source entity reference when custom custody predicates are configured ({@code P10.9-R01}). */
     public static final String SNAPSHOT_ENTITY_REF_META_KEY = "__authz.entityRef";
 
+    /** Tenant and organizational isolation metadata resolved from {@link AuthzTenantScope}. */
+    public record TenantScopeSpec(
+            AuthzTenantScopeMode mode,
+            String tenantField,
+            String resourceFactPath,
+            String subjectFactPath,
+            String policyId,
+            String ruleId,
+            boolean allowBulkWithoutScope,
+            String sharedBulkNonNullFactPath
+    ) {
+        public TenantScopeSpec {
+            mode = mode == null ? AuthzTenantScopeMode.ORGANIZATIONAL_UNIT : mode;
+            tenantField = (tenantField == null || tenantField.isBlank()) ? "tenantId" : tenantField.trim();
+            resourceFactPath = (resourceFactPath == null || resourceFactPath.isBlank())
+                    ? "resource." + tenantField
+                    : resourceFactPath.trim();
+            subjectFactPath = (subjectFactPath == null || subjectFactPath.isBlank())
+                    ? (mode == AuthzTenantScopeMode.TENANT_ONLY ? "subject.tenantId" : "subject.organizationUnitIds")
+                    : subjectFactPath.trim();
+            policyId = policyId == null ? "" : policyId.trim();
+            ruleId = ruleId == null ? "" : ruleId.trim();
+            sharedBulkNonNullFactPath = sharedBulkNonNullFactPath == null ? "" : sharedBulkNonNullFactPath.trim();
+        }
+    }
+
+    /** Mandatory scope anchor constraint resolved from {@link AuthzScopeAnchor}. */
+    public record ScopeAnchorSpec(
+            String attributeId,
+            String factPath,
+            boolean requiredOnCreate,
+            boolean forbidClearOnUpdate,
+            boolean immutableAfterCreate,
+            String reason
+    ) {
+        public ScopeAnchorSpec {
+            Objects.requireNonNull(attributeId, "attributeId is required");
+            factPath = factPath == null ? "" : factPath.trim();
+            reason = reason == null ? "" : reason.trim();
+        }
+    }
+
+    /** Declarative rule specification resolved from {@link AuthzActionRule}. */
+    public record ActionRuleSpec(
+            String actionKey,
+            String surfaceKey,
+            String ruleId,
+            String policyId,
+            Set<EvaluationMode> evaluationModes,
+            boolean requireAuthenticatedPrincipal,
+            Set<String> requiredRoles,
+            String conditionFactPath,
+            List<String> conditionAllowedValues,
+            String conditionJsonLogic,
+            Set<String> allowedWriteAttributes,
+            String reasonCode,
+            boolean auditRequired,
+            String auditCategory,
+            String legalPurpose,
+            String legalBasisRef,
+            String description
+    ) {
+        public ActionRuleSpec {
+            actionKey = actionKey == null ? "" : actionKey.trim();
+            surfaceKey = surfaceKey == null ? "" : surfaceKey.trim();
+            ruleId = ruleId == null ? "" : ruleId.trim();
+            policyId = policyId == null ? "" : policyId.trim();
+            evaluationModes = evaluationModes == null ? Set.of() : Set.copyOf(evaluationModes);
+            requiredRoles = requiredRoles == null ? Set.of() : Set.copyOf(requiredRoles);
+            conditionFactPath = conditionFactPath == null ? "" : conditionFactPath.trim();
+            conditionAllowedValues = conditionAllowedValues == null ? List.of() : List.copyOf(conditionAllowedValues);
+            conditionJsonLogic = conditionJsonLogic == null ? "" : conditionJsonLogic.trim();
+            allowedWriteAttributes = allowedWriteAttributes == null ? Set.of() : Set.copyOf(allowedWriteAttributes);
+            reasonCode = reasonCode == null ? "" : reasonCode.trim();
+            auditCategory = auditCategory == null ? "" : auditCategory.trim();
+            legalPurpose = legalPurpose == null ? "" : legalPurpose.trim();
+            legalBasisRef = legalBasisRef == null ? "" : legalBasisRef.trim();
+            description = description == null ? "" : description.trim();
+        }
+
+        public boolean targetsSurface() {
+            return !surfaceKey.isEmpty();
+        }
+    }
+
     private final String resourceKey;
+    private final String serviceKey;
     private final FactContract factContract;
     private final DecisionPointDescriptor decisionPoint;
     private final String factContractDigest;
@@ -145,27 +262,38 @@ public final class AuthzResourceGovernanceSpec<E> {
     private final JpaCriteriaDataScopeTranslator criteriaTranslator;
     private final DualScopeDelegationSpec dualScopeDelegationSpec;
     private final Set<String> mandatoryScopeAnchorAttributeIds;
+    private final List<ScopeAnchorSpec> scopeAnchorSpecs;
     private final Set<String> technicalConcurrencyPointers;
     private final String tenantFieldName;
     private final Class<?> tenantJavaType;
     private final String tenantJpqlExpression;
+    private final AuthzTenantScopeMode tenantScopeMode;
+    private final TenantScopeSpec tenantScopeSpec;
+    private final String hardScopeSubjectFactKey;
+    private final boolean allowGlobalNullScope;
+    private final boolean immutableTenantAnchor;
+    private final HardScopeResolver hardScopeResolver;
     private final Function<E, String> entityTenantExtractor;
     private final BiPredicate<E, AuthzCallerContext> entityScopePredicate;
     private final Function<E, Map<String, Object>> targetFactExtractor;
     private final String stateFieldName;
     private final Function<E, String> stateExtractor;
-    private final String cedenteEntityFieldPath;
-    private final String cedenteSubjectFactKey;
-    private final BiPredicate<E, AuthzCallerContext> cedenteCustodyPredicate;
-    private final String cessionarioEntityFieldPath;
-    private final String cessionarioSubjectFactKey;
-    private final BiPredicate<E, AuthzCallerContext> cessionarioCustodyPredicate;
+    private final String originEntityFieldPath;
+    private final String originSubjectFactKey;
+    private final BiPredicate<E, AuthzCallerContext> originCustodyPredicate;
+    private final String destinationEntityFieldPath;
+    private final String destinationSubjectFactKey;
+    private final BiPredicate<E, AuthzCallerContext> destinationCustodyPredicate;
     private final Map<String, Set<String>> operationModifiedAttributes;
     private final Map<String, DecisionPointDescriptor> actionDecisionPoints;
     private final Map<String, DecisionPointDescriptor> surfaceDecisionPoints;
+    private final List<DeclaredMaskSpec> maskSpecs;
+    private final Map<String, ActionRuleSpec> actionRuleSpecs;
+    private final Map<String, ActionRuleSpec> surfaceRuleSpecs;
 
     private AuthzResourceGovernanceSpec(Builder<E> builder) {
         this.resourceKey = Objects.requireNonNull(builder.resourceKey, "resourceKey is required");
+        this.serviceKey = builder.serviceKey;
         this.factContract = builder.factContract;
         this.decisionPoint = Objects.requireNonNull(builder.decisionPoint, "decisionPoint is required");
         this.factContractDigest = Objects.requireNonNull(builder.factContractDigest, "factContractDigest is required");
@@ -180,23 +308,34 @@ public final class AuthzResourceGovernanceSpec<E> {
         this.criteriaTranslator = new JpaCriteriaDataScopeTranslator(this.queryProjection, this.fieldBindings);
         this.dualScopeDelegationSpec = builder.dualScopeDelegationSpec;
         this.mandatoryScopeAnchorAttributeIds = Set.copyOf(builder.mandatoryScopeAnchorAttributeIds);
+        this.scopeAnchorSpecs = List.copyOf(builder.scopeAnchorSpecs);
         this.technicalConcurrencyPointers = Set.copyOf(builder.technicalConcurrencyPointers);
         this.tenantFieldName = Objects.requireNonNull(builder.tenantFieldName, "tenantFieldName is required");
         this.tenantJavaType = builder.tenantJavaType;
         this.tenantJpqlExpression = builder.tenantJpqlExpression != null
                 ? builder.tenantJpqlExpression
                 : "e." + this.tenantFieldName;
+        this.tenantScopeMode = builder.tenantScopeMode != null
+                ? builder.tenantScopeMode
+                : AuthzTenantScopeMode.ORGANIZATIONAL_UNIT;
+        this.tenantScopeSpec = builder.tenantScopeSpec;
+        this.hardScopeSubjectFactKey = builder.hardScopeSubjectFactKey;
+        this.allowGlobalNullScope = builder.allowGlobalNullScope;
+        this.immutableTenantAnchor = builder.immutableTenantAnchor;
+        this.hardScopeResolver = builder.hardScopeResolver != null
+                ? builder.hardScopeResolver
+                : new MultiOrganizationHardScopeResolver();
         this.entityTenantExtractor = builder.entityTenantExtractor;
         this.entityScopePredicate = builder.entityScopePredicate;
         this.targetFactExtractor = builder.targetFactExtractor;
         this.stateFieldName = builder.stateFieldName;
         this.stateExtractor = builder.stateExtractor;
-        this.cedenteEntityFieldPath = builder.cedenteEntityFieldPath;
-        this.cedenteSubjectFactKey = builder.cedenteSubjectFactKey;
-        this.cedenteCustodyPredicate = builder.cedenteCustodyPredicate;
-        this.cessionarioEntityFieldPath = builder.cessionarioEntityFieldPath;
-        this.cessionarioSubjectFactKey = builder.cessionarioSubjectFactKey;
-        this.cessionarioCustodyPredicate = builder.cessionarioCustodyPredicate;
+        this.originEntityFieldPath = builder.originEntityFieldPath;
+        this.originSubjectFactKey = builder.originSubjectFactKey;
+        this.originCustodyPredicate = builder.originCustodyPredicate;
+        this.destinationEntityFieldPath = builder.destinationEntityFieldPath;
+        this.destinationSubjectFactKey = builder.destinationSubjectFactKey;
+        this.destinationCustodyPredicate = builder.destinationCustodyPredicate;
         Map<String, Set<String>> opAttrs = new LinkedHashMap<>();
         for (Map.Entry<String, Set<String>> e : builder.operationModifiedAttributes.entrySet()) {
             opAttrs.put(e.getKey(), Set.copyOf(e.getValue()));
@@ -204,6 +343,9 @@ public final class AuthzResourceGovernanceSpec<E> {
         this.operationModifiedAttributes = Map.copyOf(opAttrs);
         this.actionDecisionPoints = Map.copyOf(builder.actionDecisionPoints);
         this.surfaceDecisionPoints = Map.copyOf(builder.surfaceDecisionPoints);
+        this.maskSpecs = List.copyOf(builder.maskSpecs);
+        this.actionRuleSpecs = Map.copyOf(builder.actionRuleSpecs);
+        this.surfaceRuleSpecs = Map.copyOf(builder.surfaceRuleSpecs);
     }
 
     /**
@@ -273,6 +415,62 @@ public final class AuthzResourceGovernanceSpec<E> {
      * @param controllerClass optional controller class
      * @return complete {@link AuthzResourceGovernanceSpec}
      */
+    /**
+     * Zero-blueprint factory ({@code PLAT-EVO-10}) relying on {@link AuthzTenantScope} (or default
+     * {@code "tenantId"}), {@link AuthzScopeAnchor}, {@link AuthzCustodyPartition},
+     * {@link AuthzMask}, and {@link AuthzActionRule} annotations without specifying
+     * {@code tenantFieldName} manually.
+     */
+    public static <E> AuthzResourceGovernanceSpec<E> fromAnnotatedResource(
+            String serviceKey,
+            Class<E> entityClass,
+            Class<?> responseDtoClass,
+            Class<?> filterDtoClass,
+            Class<?> controllerClass
+    ) {
+        return fromAnnotatedResource(
+                serviceKey,
+                (String) null,
+                entityClass,
+                responseDtoClass,
+                filterDtoClass,
+                controllerClass
+        );
+    }
+
+    /**
+     * Zero-blueprint factory ({@code PLAT-EVO-10}) accepting explicit write DTOs and service class
+     * for full {@code @Authz*} annotation discovery.
+     */
+    public static <E> AuthzResourceGovernanceSpec<E> fromAnnotatedResource(
+            String serviceKey,
+            String resourceKey,
+            String tenantFieldName,
+            Class<E> entityClass,
+            Class<?> responseDtoClass,
+            Class<?> filterDtoClass,
+            Class<?> createDtoClass,
+            Class<?> updateDtoClass,
+            Class<?> controllerClass,
+            Class<?> serviceClass
+    ) {
+        Builder<E> builder = AuthzResourceGovernanceSpec.<E>builder(resourceKey)
+                .serviceKey(serviceKey);
+        if (tenantFieldName != null && !tenantFieldName.isBlank()) {
+            builder.tenantField(tenantFieldName);
+        }
+        return builder.introspectFromResource(
+                        entityClass,
+                        responseDtoClass,
+                        filterDtoClass,
+                        createDtoClass,
+                        updateDtoClass,
+                        controllerClass,
+                        serviceClass
+                )
+                .build();
+    }
+
     public static <E> AuthzResourceGovernanceSpec<E> fromAnnotatedResource(
             String serviceKey,
             String resourceKey,
@@ -282,15 +480,30 @@ public final class AuthzResourceGovernanceSpec<E> {
             Class<?> filterDtoClass,
             Class<?> controllerClass
     ) {
-        return AuthzResourceGovernanceSpec.<E>builder(resourceKey)
-                .serviceKey(serviceKey)
-                .tenantField(tenantFieldName)
-                .introspectFromResource(entityClass, responseDtoClass, filterDtoClass, controllerClass)
-                .build();
+        return fromAnnotatedResource(
+                serviceKey,
+                resourceKey,
+                tenantFieldName,
+                entityClass,
+                responseDtoClass,
+                filterDtoClass,
+                null,
+                null,
+                controllerClass,
+                null
+        );
     }
 
     public String resourceKey() {
         return resourceKey;
+    }
+
+    /** Returns the optional owning microservice/host key configured on the spec. */
+    public String serviceKey() {
+        if (serviceKey != null && !serviceKey.isBlank()) {
+            return serviceKey;
+        }
+        return decisionPoint.identity().serviceKey();
     }
 
     /** Returns the optional {@link FactContract} associated with or derived by this spec ({@code Fase P10.14}). */
@@ -330,6 +543,11 @@ public final class AuthzResourceGovernanceSpec<E> {
         return mandatoryScopeAnchorAttributeIds;
     }
 
+    /** Returns declarative {@link ScopeAnchorSpec} contracts extracted from {@link AuthzScopeAnchor}. */
+    public List<ScopeAnchorSpec> scopeAnchorSpecs() {
+        return scopeAnchorSpecs;
+    }
+
     public Set<String> technicalConcurrencyPointers() {
         return technicalConcurrencyPointers;
     }
@@ -338,8 +556,42 @@ public final class AuthzResourceGovernanceSpec<E> {
         return tenantFieldName;
     }
 
+    public Class<?> tenantJavaType() {
+        return tenantJavaType;
+    }
+
     public String tenantJpqlExpression() {
         return tenantJpqlExpression;
+    }
+
+    /** Returns the resolved {@link AuthzTenantScopeMode} for this resource. */
+    public AuthzTenantScopeMode tenantScopeMode() {
+        return tenantScopeMode;
+    }
+
+    /** Returns the optional declarative {@link TenantScopeSpec} extracted from {@link AuthzTenantScope}. */
+    public TenantScopeSpec tenantScopeSpec() {
+        return tenantScopeSpec;
+    }
+
+    /** Returns the optional explicit subject fact key driving multi-organization hard scope. */
+    public String hardScopeSubjectFactKey() {
+        return hardScopeSubjectFactKey;
+    }
+
+    /** Returns whether {@code null} scope values represent globally visible rows. */
+    public boolean allowGlobalNullScope() {
+        return allowGlobalNullScope;
+    }
+
+    /** Returns whether the tenant/organization scope anchor is marked immutable after creation. */
+    public boolean hasImmutableTenantAnchor() {
+        return immutableTenantAnchor;
+    }
+
+    /** Returns the {@link HardScopeResolver} configured for this spec. */
+    public HardScopeResolver hardScopeResolver() {
+        return hardScopeResolver;
     }
 
     public Map<String, Set<String>> operationModifiedAttributes() {
@@ -354,39 +606,131 @@ public final class AuthzResourceGovernanceSpec<E> {
         return surfaceDecisionPoints;
     }
 
+    /** Returns all declared {@link AuthzMask} and derived {@code @DomainGovernance} mask bindings. */
+    public List<DeclaredMaskSpec> maskSpecs() {
+        return maskSpecs;
+    }
+
+    /** Returns the effective {@link MaskContributionSpec} list for bootstrap policy synthesis. */
+    public List<MaskContributionSpec> effectiveMaskDirectives() {
+        if (maskSpecs.isEmpty()) {
+            return List.of();
+        }
+        return maskSpecs.stream().map(DeclaredMaskSpec::contribution).toList();
+    }
+
+    /** Returns declarative action rules mapped by canonical action key. */
+    public Map<String, ActionRuleSpec> actionRuleSpecs() {
+        return actionRuleSpecs;
+    }
+
+    /** Returns declarative surface rules mapped by canonical surface key. */
+    public Map<String, ActionRuleSpec> surfaceRuleSpecs() {
+        return surfaceRuleSpecs;
+    }
+
     /** Returns the optional entity state property path used for {@link ResourceStateSnapshot#state()}. */
     public String stateFieldName() {
         return stateFieldName;
     }
 
-    /** Returns the optional entity property path storing the {@code Cedente} custody anchor value. */
+    /** Returns the optional entity property path storing the authoritative origin custody anchor value. */
+    public String originEntityFieldPath() {
+        return originEntityFieldPath;
+    }
+
+    /** Returns the optional caller subject fact key compared against {@link #originEntityFieldPath()}. */
+    public String originSubjectFactKey() {
+        return originSubjectFactKey;
+    }
+
+    /** Returns the optional entity property path storing the delegated destination custody anchor value. */
+    public String destinationEntityFieldPath() {
+        return destinationEntityFieldPath;
+    }
+
+    /** Returns the optional caller subject fact key compared against {@link #destinationEntityFieldPath()}. */
+    public String destinationSubjectFactKey() {
+        return destinationSubjectFactKey;
+    }
+
+    /** Returns {@code true} when declarative origin custody rules are configured on this spec. */
+    public boolean hasDeclarativeOriginCustody() {
+        return originCustodyPredicate != null || (originEntityFieldPath != null && originSubjectFactKey != null);
+    }
+
+    /** Returns {@code true} when declarative destination custody rules are configured on this spec. */
+    public boolean hasDeclarativeDestinationCustody() {
+        return destinationCustodyPredicate != null
+                || (destinationEntityFieldPath != null && destinationSubjectFactKey != null);
+    }
+
+    /**
+     * Backward-compatible delegate for {@link #originEntityFieldPath()}.
+     *
+     * @deprecated Use {@link #originEntityFieldPath()}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     public String cedenteEntityFieldPath() {
-        return cedenteEntityFieldPath;
+        return originEntityFieldPath();
     }
 
-    /** Returns the optional caller subject fact key compared against {@link #cedenteEntityFieldPath()}. */
+    /**
+     * Backward-compatible delegate for {@link #originSubjectFactKey()}.
+     *
+     * @deprecated Use {@link #originSubjectFactKey()}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     public String cedenteSubjectFactKey() {
-        return cedenteSubjectFactKey;
+        return originSubjectFactKey();
     }
 
-    /** Returns the optional entity property path storing the {@code Cessionário} custody anchor value. */
+    /**
+     * Backward-compatible delegate for {@link #destinationEntityFieldPath()}.
+     *
+     * @deprecated Use {@link #destinationEntityFieldPath()}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     public String cessionarioEntityFieldPath() {
-        return cessionarioEntityFieldPath;
+        return destinationEntityFieldPath();
     }
 
-    /** Returns the optional caller subject fact key compared against {@link #cessionarioEntityFieldPath()}. */
+    /**
+     * Backward-compatible delegate for {@link #destinationSubjectFactKey()}.
+     *
+     * @deprecated Use {@link #destinationSubjectFactKey()}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     public String cessionarioSubjectFactKey() {
-        return cessionarioSubjectFactKey;
+        return destinationSubjectFactKey();
     }
 
-    /** Returns {@code true} when declarative {@code Cedente} custody rules are configured on this spec. */
+    /**
+     * Backward-compatible delegate for {@link #hasDeclarativeOriginCustody()}.
+     *
+     * @deprecated Use {@link #hasDeclarativeOriginCustody()}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     public boolean hasDeclarativeCedenteCustody() {
-        return cedenteCustodyPredicate != null || (cedenteEntityFieldPath != null && cedenteSubjectFactKey != null);
+        return hasDeclarativeOriginCustody();
     }
 
-    /** Returns {@code true} when declarative {@code Cessionário} custody rules are configured on this spec. */
+    /**
+     * Backward-compatible delegate for {@link #hasDeclarativeDestinationCustody()}.
+     *
+     * @deprecated Use {@link #hasDeclarativeDestinationCustody()}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     public boolean hasDeclarativeCessionarioCustody() {
-        return cessionarioCustodyPredicate != null || (cessionarioEntityFieldPath != null && cessionarioSubjectFactKey != null);
+        return hasDeclarativeDestinationCustody();
+    }
+
+    /**
+     * Builds the JPA Criteria {@link ResourceFilterAccessScope} for the given {@link AuthzCallerContext},
+     * supporting single-tenant, multi-organization ({@code IN}), and shared scopes via {@link HardScopeResolver}.
+     */
+    public ResourceFilterAccessScope<E> buildHardScope(AuthzCallerContext callerContext) {
+        return hardScopeResolver.buildCriteriaScope(this, callerContext);
     }
 
     /**
@@ -396,6 +740,9 @@ public final class AuthzResourceGovernanceSpec<E> {
      */
     public ResourceFilterAccessScope<E> buildHardScope(String tenantId) {
         Objects.requireNonNull(tenantId, "tenantId is required for hardScope");
+        if (tenantScopeMode == AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            return ResourceFilterAccessScope.unrestricted();
+        }
         return ResourceFilterAccessScope.restricted(
                 (root, query, cb) -> {
                     Path<?> path = resolveCriteriaTenantPath(root, tenantFieldName);
@@ -414,6 +761,14 @@ public final class AuthzResourceGovernanceSpec<E> {
             current = current.join(segments[i], JoinType.INNER);
         }
         return current.get(segments[segments.length - 1]);
+    }
+
+    static Object coerceScopeValue(Class<?> expectedType, String value) {
+        return coerceTenantValue(expectedType, value);
+    }
+
+    static boolean scopeValuesEqual(Object a, Object b) {
+        return valuesEqual(a, b, false);
     }
 
     private static Object coerceTenantValue(Class<?> expectedType, String tenantId) {
@@ -443,10 +798,27 @@ public final class AuthzResourceGovernanceSpec<E> {
     }
 
     /**
+     * Returns the canonical JPQL hard-scope predicate expression for a caller context (single or multi-org).
+     */
+    public String buildHardScopeJpql(AuthzCallerContext callerContext) {
+        return hardScopeResolver.buildJpqlPredicate(this, callerContext);
+    }
+
+    /**
      * Returns the canonical JPQL hard-scope predicate expression.
      */
     public String buildHardScopeJpql() {
+        if (tenantScopeMode == AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            return "1 = 1";
+        }
         return tenantJpqlExpression + " = :" + HARD_TENANT_PARAM;
+    }
+
+    /**
+     * Returns the canonical JPQL hard-scope parameter map for the given {@link AuthzCallerContext}.
+     */
+    public Map<String, Object> buildHardScopeParams(AuthzCallerContext callerContext) {
+        return hardScopeResolver.buildJpqlParams(this, callerContext);
     }
 
     /**
@@ -454,7 +826,38 @@ public final class AuthzResourceGovernanceSpec<E> {
      */
     public Map<String, Object> buildHardScopeParams(String tenantId) {
         Objects.requireNonNull(tenantId, "tenantId is required for hardScopeParams");
+        if (tenantScopeMode == AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            return Map.of();
+        }
         return Map.of(HARD_TENANT_PARAM, coerceTenantValue(tenantJavaType, tenantId));
+    }
+
+    /**
+     * Extracts the raw organizational/tenant scope field value from {@code entity}.
+     */
+    public Object extractRawScopeValueFromEntity(E entity) {
+        if (entity == null) {
+            return null;
+        }
+        if (entityTenantExtractor != null) {
+            return entityTenantExtractor.apply(entity);
+        }
+        return readNestedProperty(entity, tenantFieldName);
+    }
+
+    /**
+     * Resolves the effective hard-scope selection ({@code SINGLE_VALUE}, {@code MULTI_ORGANIZATION},
+     * {@code SHARED_UNRESTRICTED}, or {@code DENIED}) via the configured {@link HardScopeResolver}.
+     */
+    public HardScopeResolver.HardScopeSelection resolveHardScopeSelection(AuthzCallerContext callerContext) {
+        return hardScopeResolver.resolveSelection(this, callerContext);
+    }
+
+    /**
+     * Verifies write-target organizational invariants against {@link HardScopeResolver}.
+     */
+    public void verifyWritableTarget(E candidate, E previous, AuthzCallerContext callerContext) {
+        hardScopeResolver.verifyWritableTarget(this, candidate, previous, callerContext);
     }
 
     /**
@@ -500,16 +903,16 @@ public final class AuthzResourceGovernanceSpec<E> {
             }
         }
         if (dualScopeDelegationSpec != null) {
-            if (cedenteEntityFieldPath != null && dualScopeDelegationSpec.cedenteFactPath() != null) {
-                Object cedenteVal = readNestedProperty(entity, cedenteEntityFieldPath);
-                if (cedenteVal != null) {
-                    facts.putIfAbsent(dualScopeDelegationSpec.cedenteFactPath(), cedenteVal);
+            if (originEntityFieldPath != null && dualScopeDelegationSpec.originFactPath() != null) {
+                Object originVal = readNestedProperty(entity, originEntityFieldPath);
+                if (originVal != null) {
+                    facts.putIfAbsent(dualScopeDelegationSpec.originFactPath(), originVal);
                 }
             }
-            if (cessionarioEntityFieldPath != null && dualScopeDelegationSpec.cessionarioFactPath() != null) {
-                Object cessionarioVal = readNestedProperty(entity, cessionarioEntityFieldPath);
-                if (cessionarioVal != null) {
-                    facts.putIfAbsent(dualScopeDelegationSpec.cessionarioFactPath(), cessionarioVal);
+            if (destinationEntityFieldPath != null && dualScopeDelegationSpec.destinationFactPath() != null) {
+                Object destinationVal = readNestedProperty(entity, destinationEntityFieldPath);
+                if (destinationVal != null) {
+                    facts.putIfAbsent(dualScopeDelegationSpec.destinationFactPath(), destinationVal);
                 }
             }
         }
@@ -563,23 +966,25 @@ public final class AuthzResourceGovernanceSpec<E> {
                 }
             }
         }
-        String tenantId = extractTenantFromEntity(entity);
-        if (tenantId != null) {
-            metadata.put(SNAPSHOT_TENANT_META_KEY, tenantId);
-        }
-        if (cedenteEntityFieldPath != null) {
-            Object cedenteVal = readNestedProperty(entity, cedenteEntityFieldPath);
-            if (cedenteVal != null) {
-                metadata.put(SNAPSHOT_CEDENTE_VALUE_META_KEY, cedenteVal);
+        if (tenantScopeMode != AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            String tenantId = extractTenantFromEntity(entity);
+            if (tenantId != null) {
+                metadata.put(SNAPSHOT_TENANT_META_KEY, tenantId);
             }
         }
-        if (cessionarioEntityFieldPath != null) {
-            Object cessionarioVal = readNestedProperty(entity, cessionarioEntityFieldPath);
-            if (cessionarioVal != null) {
-                metadata.put(SNAPSHOT_CESSIONARIO_VALUE_META_KEY, cessionarioVal);
+        if (originEntityFieldPath != null) {
+            Object originVal = readNestedProperty(entity, originEntityFieldPath);
+            if (originVal != null) {
+                metadata.put(SNAPSHOT_ORIGIN_VALUE_META_KEY, originVal);
             }
         }
-        if (cedenteCustodyPredicate != null || cessionarioCustodyPredicate != null) {
+        if (destinationEntityFieldPath != null) {
+            Object destinationVal = readNestedProperty(entity, destinationEntityFieldPath);
+            if (destinationVal != null) {
+                metadata.put(SNAPSHOT_DESTINATION_VALUE_META_KEY, destinationVal);
+            }
+        }
+        if (originCustodyPredicate != null || destinationCustodyPredicate != null) {
             metadata.put(SNAPSHOT_ENTITY_REF_META_KEY, entity);
         }
         return ResourceStateSnapshot.of(state, metadata);
@@ -617,127 +1022,151 @@ public final class AuthzResourceGovernanceSpec<E> {
     }
 
     /**
-     * Evaluates whether the caller represented by {@code callerContext} holds {@code Cedente}
-     * (origin) custody over {@code entity} ({@code Fase P10.9}).
+     * Evaluates whether the caller represented by {@code callerContext} holds authoritative origin
+     * custody over {@code entity} ({@code Fase P10.9}).
      *
      * @param entity JPA entity instance (may be {@code null} for collection-scoped probes)
      * @param callerContext active caller context
-     * @return {@code true} when caller holds {@code Cedente} custody
+     * @return {@code true} when caller holds origin custody
      */
+    public boolean isCallerOrigin(E entity, AuthzCallerContext callerContext) {
+        if (callerContext == null) {
+            return dualScopeDelegationSpec == null;
+        }
+        if (callerContext.callerMatchesOrigin() != null) {
+            return callerContext.callerMatchesOrigin();
+        }
+        if (originCustodyPredicate != null && entity != null) {
+            return originCustodyPredicate.test(entity, callerContext);
+        }
+        if (originEntityFieldPath != null && originSubjectFactKey != null) {
+            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(originSubjectFactKey);
+            if (entity == null) {
+                return hasNonEmptyCustodySubjectFact(subjectFact);
+            }
+            Object entityVal = readNestedProperty(entity, originEntityFieldPath);
+            return matchesCustodyValue(entityVal, subjectFact);
+        }
+        return true;
+    }
+
+    /**
+     * Evaluates whether the caller represented by {@code callerContext} holds delegated destination
+     * custody over {@code entity} ({@code Fase P10.9}).
+     *
+     * @param entity JPA entity instance (may be {@code null} for collection-scoped probes)
+     * @param callerContext active caller context
+     * @return {@code true} when caller holds destination custody
+     */
+    public boolean isCallerDestination(E entity, AuthzCallerContext callerContext) {
+        if (callerContext == null) {
+            return dualScopeDelegationSpec == null;
+        }
+        if (callerContext.callerMatchesDestination() != null) {
+            return callerContext.callerMatchesDestination();
+        }
+        if (destinationCustodyPredicate != null && entity != null) {
+            return destinationCustodyPredicate.test(entity, callerContext);
+        }
+        if (destinationEntityFieldPath != null && destinationSubjectFactKey != null) {
+            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(destinationSubjectFactKey);
+            if (entity == null) {
+                return hasNonEmptyCustodySubjectFact(subjectFact);
+            }
+            Object entityVal = readNestedProperty(entity, destinationEntityFieldPath);
+            return matchesCustodyValue(entityVal, subjectFact);
+        }
+        return true;
+    }
+
+    /**
+     * Evaluates whether the caller holds origin custody for an item {@link ResourceStateSnapshot}
+     * ({@code Fase P10.9}, {@code P10.9-R01}).
+     */
+    @SuppressWarnings("unchecked")
+    public boolean isCallerOriginForSnapshot(ResourceStateSnapshot snapshot, AuthzCallerContext callerContext) {
+        if (callerContext == null) {
+            return dualScopeDelegationSpec == null;
+        }
+        if (callerContext.callerMatchesOrigin() != null) {
+            return callerContext.callerMatchesOrigin();
+        }
+        if (snapshot == null) {
+            return false;
+        }
+        if (originCustodyPredicate != null) {
+            Object entityRef = snapshot.metadata().get(SNAPSHOT_ENTITY_REF_META_KEY);
+            if (entityRef != null) {
+                return originCustodyPredicate.test((E) entityRef, callerContext);
+            }
+            return false;
+        }
+        if (originEntityFieldPath != null && originSubjectFactKey != null) {
+            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(originSubjectFactKey);
+            Object snapshotVal = snapshot.metadata().get(SNAPSHOT_ORIGIN_VALUE_META_KEY);
+            if (snapshotVal == null) {
+                snapshotVal = snapshot.metadata().get(originEntityFieldPath);
+            }
+            return matchesCustodyValue(snapshotVal, subjectFact);
+        }
+        return true;
+    }
+
+    /**
+     * Evaluates whether the caller holds destination custody for an item {@link ResourceStateSnapshot}
+     * ({@code Fase P10.9}, {@code P10.9-R01}).
+     */
+    @SuppressWarnings("unchecked")
+    public boolean isCallerDestinationForSnapshot(ResourceStateSnapshot snapshot, AuthzCallerContext callerContext) {
+        if (callerContext == null) {
+            return dualScopeDelegationSpec == null;
+        }
+        if (callerContext.callerMatchesDestination() != null) {
+            return callerContext.callerMatchesDestination();
+        }
+        if (snapshot == null) {
+            return false;
+        }
+        if (destinationCustodyPredicate != null) {
+            Object entityRef = snapshot.metadata().get(SNAPSHOT_ENTITY_REF_META_KEY);
+            if (entityRef != null) {
+                return destinationCustodyPredicate.test((E) entityRef, callerContext);
+            }
+            return false;
+        }
+        if (destinationEntityFieldPath != null && destinationSubjectFactKey != null) {
+            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(destinationSubjectFactKey);
+            Object snapshotVal = snapshot.metadata().get(SNAPSHOT_DESTINATION_VALUE_META_KEY);
+            if (snapshotVal == null) {
+                snapshotVal = snapshot.metadata().get(destinationEntityFieldPath);
+            }
+            return matchesCustodyValue(snapshotVal, subjectFact);
+        }
+        return true;
+    }
+
+    /** @deprecated Use {@link #isCallerOrigin(Object, AuthzCallerContext)}. */
+    @Deprecated(since = "0.1.0-beta.2")
     public boolean isCallerCedente(E entity, AuthzCallerContext callerContext) {
-        if (callerContext == null) {
-            return dualScopeDelegationSpec == null;
-        }
-        if (callerContext.callerMatchesCedente() != null) {
-            return callerContext.callerMatchesCedente();
-        }
-        if (cedenteCustodyPredicate != null && entity != null) {
-            return cedenteCustodyPredicate.test(entity, callerContext);
-        }
-        if (cedenteEntityFieldPath != null && cedenteSubjectFactKey != null) {
-            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(cedenteSubjectFactKey);
-            if (entity == null) {
-                return hasNonEmptyCustodySubjectFact(subjectFact);
-            }
-            Object entityVal = readNestedProperty(entity, cedenteEntityFieldPath);
-            return matchesCustodyValue(entityVal, subjectFact);
-        }
-        return true;
+        return isCallerOrigin(entity, callerContext);
     }
 
-    /**
-     * Evaluates whether the caller represented by {@code callerContext} holds {@code Cessionário}
-     * (destination) custody over {@code entity} ({@code Fase P10.9}).
-     *
-     * @param entity JPA entity instance (may be {@code null} for collection-scoped probes)
-     * @param callerContext active caller context
-     * @return {@code true} when caller holds {@code Cessionário} custody
-     */
+    /** @deprecated Use {@link #isCallerDestination(Object, AuthzCallerContext)}. */
+    @Deprecated(since = "0.1.0-beta.2")
     public boolean isCallerCessionario(E entity, AuthzCallerContext callerContext) {
-        if (callerContext == null) {
-            return dualScopeDelegationSpec == null;
-        }
-        if (callerContext.callerMatchesCessionario() != null) {
-            return callerContext.callerMatchesCessionario();
-        }
-        if (cessionarioCustodyPredicate != null && entity != null) {
-            return cessionarioCustodyPredicate.test(entity, callerContext);
-        }
-        if (cessionarioEntityFieldPath != null && cessionarioSubjectFactKey != null) {
-            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(cessionarioSubjectFactKey);
-            if (entity == null) {
-                return hasNonEmptyCustodySubjectFact(subjectFact);
-            }
-            Object entityVal = readNestedProperty(entity, cessionarioEntityFieldPath);
-            return matchesCustodyValue(entityVal, subjectFact);
-        }
-        return true;
+        return isCallerDestination(entity, callerContext);
     }
 
-    /**
-     * Evaluates whether the caller holds {@code Cedente} custody for an item {@link ResourceStateSnapshot}
-     * ({@code Fase P10.9}, {@code P10.9-R01}).
-     */
-    @SuppressWarnings("unchecked")
+    /** @deprecated Use {@link #isCallerOriginForSnapshot(ResourceStateSnapshot, AuthzCallerContext)}. */
+    @Deprecated(since = "0.1.0-beta.2")
     public boolean isCallerCedenteForSnapshot(ResourceStateSnapshot snapshot, AuthzCallerContext callerContext) {
-        if (callerContext == null) {
-            return dualScopeDelegationSpec == null;
-        }
-        if (callerContext.callerMatchesCedente() != null) {
-            return callerContext.callerMatchesCedente();
-        }
-        if (snapshot == null) {
-            return false;
-        }
-        if (cedenteCustodyPredicate != null) {
-            Object entityRef = snapshot.metadata().get(SNAPSHOT_ENTITY_REF_META_KEY);
-            if (entityRef != null) {
-                return cedenteCustodyPredicate.test((E) entityRef, callerContext);
-            }
-            return false;
-        }
-        if (cedenteEntityFieldPath != null && cedenteSubjectFactKey != null) {
-            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(cedenteSubjectFactKey);
-            Object snapshotVal = snapshot.metadata().get(SNAPSHOT_CEDENTE_VALUE_META_KEY);
-            if (snapshotVal == null) {
-                snapshotVal = snapshot.metadata().get(cedenteEntityFieldPath);
-            }
-            return matchesCustodyValue(snapshotVal, subjectFact);
-        }
-        return true;
+        return isCallerOriginForSnapshot(snapshot, callerContext);
     }
 
-    /**
-     * Evaluates whether the caller holds {@code Cessionário} custody for an item {@link ResourceStateSnapshot}
-     * ({@code Fase P10.9}, {@code P10.9-R01}).
-     */
-    @SuppressWarnings("unchecked")
+    /** @deprecated Use {@link #isCallerDestinationForSnapshot(ResourceStateSnapshot, AuthzCallerContext)}. */
+    @Deprecated(since = "0.1.0-beta.2")
     public boolean isCallerCessionarioForSnapshot(ResourceStateSnapshot snapshot, AuthzCallerContext callerContext) {
-        if (callerContext == null) {
-            return dualScopeDelegationSpec == null;
-        }
-        if (callerContext.callerMatchesCessionario() != null) {
-            return callerContext.callerMatchesCessionario();
-        }
-        if (snapshot == null) {
-            return false;
-        }
-        if (cessionarioCustodyPredicate != null) {
-            Object entityRef = snapshot.metadata().get(SNAPSHOT_ENTITY_REF_META_KEY);
-            if (entityRef != null) {
-                return cessionarioCustodyPredicate.test((E) entityRef, callerContext);
-            }
-            return false;
-        }
-        if (cessionarioEntityFieldPath != null && cessionarioSubjectFactKey != null) {
-            Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(cessionarioSubjectFactKey);
-            Object snapshotVal = snapshot.metadata().get(SNAPSHOT_CESSIONARIO_VALUE_META_KEY);
-            if (snapshotVal == null) {
-                snapshotVal = snapshot.metadata().get(cessionarioEntityFieldPath);
-            }
-            return matchesCustodyValue(snapshotVal, subjectFact);
-        }
-        return true;
+        return isCallerDestinationForSnapshot(snapshot, callerContext);
     }
 
     private static boolean hasNonEmptyCustodySubjectFact(Object subjectFact) {
@@ -787,11 +1216,7 @@ public final class AuthzResourceGovernanceSpec<E> {
     ) {
         Objects.requireNonNull(entity, "entity is required");
         Objects.requireNonNull(callerContext, "callerContext is required");
-        String entityTenant = extractTenantFromEntity(entity);
-        if (!Objects.equals(callerContext.tenantId(), entityTenant)) {
-            throw new SecurityException("AUTHZ_HARD_SCOPE_TENANT_MISMATCH: Entity tenant '"
-                    + entityTenant + "' does not match caller tenant '" + callerContext.tenantId() + "' (403)");
-        }
+        hardScopeResolver.verifyEntityAccess(this, entity, callerContext);
         if (activeDataScopePlan != null) {
             if (activeDataScopePlan.scopeOutcome() == DataScopeOutcome.NONE) {
                 throw new SecurityException(
@@ -1053,26 +1478,37 @@ public final class AuthzResourceGovernanceSpec<E> {
         private final Map<String, FactDescriptor> declarativeFacts = new LinkedHashMap<>();
         private DualScopeDelegationSpec dualScopeDelegationSpec;
         private final Set<String> mandatoryScopeAnchorAttributeIds = new LinkedHashSet<>();
+        private final List<ScopeAnchorSpec> scopeAnchorSpecs = new ArrayList<>();
         private final Set<String> technicalConcurrencyPointers = new LinkedHashSet<>(Set.of("/version"));
         private String tenantFieldName = "tenantId";
+        private boolean tenantFieldExplicitlySet = false;
         private Class<?> tenantJavaType;
         private String tenantJpqlExpression;
+        private AuthzTenantScopeMode tenantScopeMode = AuthzTenantScopeMode.ORGANIZATIONAL_UNIT;
+        private TenantScopeSpec tenantScopeSpec;
+        private String hardScopeSubjectFactKey;
+        private boolean allowGlobalNullScope = false;
+        private boolean immutableTenantAnchor = false;
+        private HardScopeResolver hardScopeResolver;
         private Function<E, String> entityTenantExtractor;
         private BiPredicate<E, AuthzCallerContext> entityScopePredicate;
         private Function<E, Map<String, Object>> targetFactExtractor;
         private String stateFieldName;
         private Function<E, String> stateExtractor;
-        private String cedenteEntityFieldPath;
-        private String cedenteSubjectFactKey;
-        private BiPredicate<E, AuthzCallerContext> cedenteCustodyPredicate;
-        private String cessionarioEntityFieldPath;
-        private String cessionarioSubjectFactKey;
-        private BiPredicate<E, AuthzCallerContext> cessionarioCustodyPredicate;
+        private String originEntityFieldPath;
+        private String originSubjectFactKey;
+        private BiPredicate<E, AuthzCallerContext> originCustodyPredicate;
+        private String destinationEntityFieldPath;
+        private String destinationSubjectFactKey;
+        private BiPredicate<E, AuthzCallerContext> destinationCustodyPredicate;
         private final Map<String, Set<String>> operationModifiedAttributes = new LinkedHashMap<>();
         private final Map<String, DecisionPointDescriptor> actionDecisionPoints = new LinkedHashMap<>();
         private final Map<String, DecisionPointDescriptor> surfaceDecisionPoints = new LinkedHashMap<>();
         private final Map<String, DeclarativeActionEndpoint> declarativeWorkflowActions = new LinkedHashMap<>();
         private final Map<String, DeclarativeSurfaceEndpoint> declarativeUiSurfaces = new LinkedHashMap<>();
+        private final List<DeclaredMaskSpec> maskSpecs = new ArrayList<>();
+        private final Map<String, ActionRuleSpec> actionRuleSpecs = new LinkedHashMap<>();
+        private final Map<String, ActionRuleSpec> surfaceRuleSpecs = new LinkedHashMap<>();
 
         private record DeclarativeActionEndpoint(
                 String actionKey,
@@ -1376,8 +1812,81 @@ public final class AuthzResourceGovernanceSpec<E> {
                 BiPredicate<E, AuthzCallerContext> entityScopePredicate
         ) {
             this.tenantFieldName = Objects.requireNonNull(tenantFieldName, "tenantFieldName is required");
+            this.tenantFieldExplicitlySet = true;
             this.entityTenantExtractor = entityTenantExtractor;
             this.entityScopePredicate = entityScopePredicate;
+            return this;
+        }
+
+        /**
+         * Configures explicit multi-organization hard-scope isolation ({@code field IN values})
+         * bound to {@code subjectFactKey} (e.g. {@code "subject.organizationUnitIds"}).
+         */
+        public Builder<E> multiOrganizationScope(String tenantFieldName, String subjectFactKey) {
+            tenantField(tenantFieldName);
+            this.tenantScopeMode = AuthzTenantScopeMode.ORGANIZATIONAL_UNIT;
+            this.hardScopeSubjectFactKey = Objects.requireNonNull(subjectFactKey, "subjectFactKey is required").trim();
+            return this;
+        }
+
+        /** Configures declarative tenant scope metadata resolved from {@link AuthzTenantScope}. */
+        public Builder<E> tenantScope(TenantScopeSpec spec) {
+            Objects.requireNonNull(spec, "tenantScopeSpec is required");
+            this.tenantScopeSpec = spec;
+            this.tenantScopeMode = spec.mode();
+            if (!this.tenantFieldExplicitlySet && !spec.tenantField().isBlank()) {
+                this.tenantFieldName = spec.tenantField();
+            }
+            if (spec.mode() == AuthzTenantScopeMode.ORGANIZATIONAL_UNIT) {
+                this.hardScopeSubjectFactKey = spec.subjectFactPath();
+            } else {
+                this.hardScopeSubjectFactKey = null;
+            }
+            return this;
+        }
+
+        public Builder<E> allowGlobalNullScope(boolean allowGlobalNullScope) {
+            this.allowGlobalNullScope = allowGlobalNullScope;
+            return this;
+        }
+
+        public Builder<E> immutableTenantAnchor(boolean immutableTenantAnchor) {
+            this.immutableTenantAnchor = immutableTenantAnchor;
+            return this;
+        }
+
+        public Builder<E> hardScopeResolver(HardScopeResolver hardScopeResolver) {
+            this.hardScopeResolver = Objects.requireNonNull(hardScopeResolver, "hardScopeResolver is required");
+            return this;
+        }
+
+        public Builder<E> scopeAnchor(ScopeAnchorSpec anchorSpec) {
+            Objects.requireNonNull(anchorSpec, "anchorSpec is required");
+            this.scopeAnchorSpecs.add(anchorSpec);
+            if (anchorSpec.requiredOnCreate() || anchorSpec.forbidClearOnUpdate()) {
+                this.mandatoryScopeAnchorAttributeIds.add(anchorSpec.attributeId());
+            }
+            return this;
+        }
+
+        public Builder<E> maskDirective(DeclaredMaskSpec maskSpec) {
+            this.maskSpecs.add(Objects.requireNonNull(maskSpec, "maskSpec is required"));
+            return this;
+        }
+
+        public Builder<E> actionRule(ActionRuleSpec ruleSpec) {
+            Objects.requireNonNull(ruleSpec, "ruleSpec is required");
+            if (ruleSpec.targetsSurface()) {
+                this.surfaceRuleSpecs.put(ruleSpec.surfaceKey(), ruleSpec);
+            } else if (!ruleSpec.actionKey().isEmpty()) {
+                this.actionRuleSpecs.put(ruleSpec.actionKey(), ruleSpec);
+                if (!ruleSpec.allowedWriteAttributes().isEmpty()) {
+                    Set<String> merged = new LinkedHashSet<>(
+                            this.operationModifiedAttributes.getOrDefault(ruleSpec.actionKey(), Set.of()));
+                    merged.addAll(ruleSpec.allowedWriteAttributes());
+                    this.operationModifiedAttributes.put(ruleSpec.actionKey(), Set.copyOf(merged));
+                }
+            }
             return this;
         }
 
@@ -1415,41 +1924,65 @@ public final class AuthzResourceGovernanceSpec<E> {
         }
 
         /**
-         * Declaratively binds {@code Cedente} custody evaluation to an entity field (e.g.
-         * {@code "cedenteOrgaoId"}) matched against a caller subject fact (e.g.
-         * {@code "subject.cedenteOrgaoIds"}) ({@code Fase P10.9}).
+         * Declaratively binds authoritative origin custody evaluation to an entity field (e.g.
+         * {@code "originOrgId"}) matched against a caller subject fact (e.g.
+         * {@code "subject.originOrgIds"}) ({@code Fase P10.9}).
          */
+        public Builder<E> originCustody(String entityFieldPath, String subjectFactKey) {
+            this.originEntityFieldPath = Objects.requireNonNull(entityFieldPath, "entityFieldPath is required");
+            this.originSubjectFactKey = Objects.requireNonNull(subjectFactKey, "subjectFactKey is required");
+            return this;
+        }
+
+        /**
+         * Configures a custom predicate for evaluating origin custody on an entity.
+         */
+        public Builder<E> originCustodyPredicate(BiPredicate<E, AuthzCallerContext> originCustodyPredicate) {
+            this.originCustodyPredicate = Objects.requireNonNull(originCustodyPredicate, "originCustodyPredicate is required");
+            return this;
+        }
+
+        /**
+         * Declaratively binds delegated destination custody evaluation to an entity field (e.g.
+         * {@code "destinationOrgId"}) matched against a caller subject fact (e.g.
+         * {@code "subject.destinationOrgIds"}) ({@code Fase P10.9}).
+         */
+        public Builder<E> destinationCustody(String entityFieldPath, String subjectFactKey) {
+            this.destinationEntityFieldPath = Objects.requireNonNull(entityFieldPath, "entityFieldPath is required");
+            this.destinationSubjectFactKey = Objects.requireNonNull(subjectFactKey, "subjectFactKey is required");
+            return this;
+        }
+
+        /**
+         * Configures a custom predicate for evaluating destination custody on an entity.
+         */
+        public Builder<E> destinationCustodyPredicate(BiPredicate<E, AuthzCallerContext> destinationCustodyPredicate) {
+            this.destinationCustodyPredicate = Objects.requireNonNull(destinationCustodyPredicate, "destinationCustodyPredicate is required");
+            return this;
+        }
+
+        /** @deprecated Use {@link #originCustody(String, String)}. */
+        @Deprecated(since = "0.1.0-beta.2")
         public Builder<E> cedenteCustody(String entityFieldPath, String subjectFactKey) {
-            this.cedenteEntityFieldPath = Objects.requireNonNull(entityFieldPath, "entityFieldPath is required");
-            this.cedenteSubjectFactKey = Objects.requireNonNull(subjectFactKey, "subjectFactKey is required");
-            return this;
+            return originCustody(entityFieldPath, subjectFactKey);
         }
 
-        /**
-         * Configures a custom predicate for evaluating {@code Cedente} custody on an entity.
-         */
-        public Builder<E> cedenteCustodyPredicate(BiPredicate<E, AuthzCallerContext> cedenteCustodyPredicate) {
-            this.cedenteCustodyPredicate = Objects.requireNonNull(cedenteCustodyPredicate, "cedenteCustodyPredicate is required");
-            return this;
+        /** @deprecated Use {@link #originCustodyPredicate(BiPredicate)}. */
+        @Deprecated(since = "0.1.0-beta.2")
+        public Builder<E> cedenteCustodyPredicate(BiPredicate<E, AuthzCallerContext> custodyPredicate) {
+            return originCustodyPredicate(custodyPredicate);
         }
 
-        /**
-         * Declaratively binds {@code Cessionário} custody evaluation to an entity field (e.g.
-         * {@code "cessionarioOrgaoId"}) matched against a caller subject fact (e.g.
-         * {@code "subject.cessionarioOrgaoIds"}) ({@code Fase P10.9}).
-         */
+        /** @deprecated Use {@link #destinationCustody(String, String)}. */
+        @Deprecated(since = "0.1.0-beta.2")
         public Builder<E> cessionarioCustody(String entityFieldPath, String subjectFactKey) {
-            this.cessionarioEntityFieldPath = Objects.requireNonNull(entityFieldPath, "entityFieldPath is required");
-            this.cessionarioSubjectFactKey = Objects.requireNonNull(subjectFactKey, "subjectFactKey is required");
-            return this;
+            return destinationCustody(entityFieldPath, subjectFactKey);
         }
 
-        /**
-         * Configures a custom predicate for evaluating {@code Cessionário} custody on an entity.
-         */
-        public Builder<E> cessionarioCustodyPredicate(BiPredicate<E, AuthzCallerContext> cessionarioCustodyPredicate) {
-            this.cessionarioCustodyPredicate = Objects.requireNonNull(cessionarioCustodyPredicate, "cessionarioCustodyPredicate is required");
-            return this;
+        /** @deprecated Use {@link #destinationCustodyPredicate(BiPredicate)}. */
+        @Deprecated(since = "0.1.0-beta.2")
+        public Builder<E> cessionarioCustodyPredicate(BiPredicate<E, AuthzCallerContext> custodyPredicate) {
+            return destinationCustodyPredicate(custodyPredicate);
         }
 
         /**
@@ -1603,16 +2136,41 @@ public final class AuthzResourceGovernanceSpec<E> {
                 Class<?> filterDtoClass,
                 Class<?> controllerClass
         ) {
+            return introspectFromResource(
+                    entityClass,
+                    responseDtoClass,
+                    filterDtoClass,
+                    null,
+                    null,
+                    controllerClass,
+                    null
+            );
+        }
+
+        /**
+         * Introspects a Praxis resource's JPA entity, {@code ResponseDTO}, {@code FilterDTO},
+         * optional write DTOs ({@code CreateDTO}/{@code UpdateDTO}), {@code Controller}, and optional
+         * {@code Service} class to automatically resolve {@code @ApiResource}, {@code @WorkflowAction},
+         * {@code @UiSurface}, {@code @Filterable}, {@code @DomainGovernance}, {@code @DomainLineage},
+         * {@link AuthzTenantScope}, {@link AuthzScopeAnchor}, {@link AuthzCustodyPartition},
+         * {@link AuthzMask}, and {@link AuthzActionRule}.
+         */
+        public Builder<E> introspectFromResource(
+                Class<E> entityClass,
+                Class<?> responseDtoClass,
+                Class<?> filterDtoClass,
+                Class<?> createDtoClass,
+                Class<?> updateDtoClass,
+                Class<?> controllerClass,
+                Class<?> serviceClass
+        ) {
             Objects.requireNonNull(entityClass, "entityClass is required");
-            if (controllerClass != null) {
-                introspectControllerEndpoints(controllerClass);
-            }
 
             MetadataDtoGovernanceIntrospector introspector = new MetadataDtoGovernanceIntrospector();
             MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract dtoContract = null;
             Map<String, DtoFieldSchemaMetadata> dtoSchemasByField = new LinkedHashMap<>();
             List<FieldLineageCatalogEntry> responseLineage = List.of();
-            if (responseDtoClass != null && responseDtoClass != Object.class && !Map.class.isAssignableFrom(responseDtoClass)) {
+            if (isDtoClass(responseDtoClass)) {
                 dtoContract = introspector.introspect(responseDtoClass, this.resourceKey);
                 for (DtoFieldSchemaMetadata schemaMeta : dtoContract.fieldSchemas()) {
                     dtoSchemasByField.put(schemaMeta.wireFieldName(), schemaMeta);
@@ -1621,17 +2179,129 @@ public final class AuthzResourceGovernanceSpec<E> {
                         this.resourceKey, responseDtoClass, "READ_PROJECTION", null);
             }
 
+            MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract =
+                    isDtoClass(createDtoClass)
+                            ? introspector.introspectWriteDto(createDtoClass, responseDtoClass, this.resourceKey)
+                            : null;
+            MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract =
+                    isDtoClass(updateDtoClass)
+                            ? introspector.introspectWriteDto(updateDtoClass, responseDtoClass, this.resourceKey)
+                            : null;
+
+            introspectTenantScopeAnnotations(entityClass, controllerClass, serviceClass);
+
+            if (controllerClass != null) {
+                introspectControllerEndpoints(controllerClass, dtoContract, responseDtoClass, introspector);
+            }
+            if (serviceClass != null) {
+                introspectActionRulesOnTypeAndMethods(serviceClass);
+            }
+            introspectActionRulesOnTypeAndMethods(entityClass);
+
             Set<String> filterPaths = collectFilterPaths(filterDtoClass);
             introspectEntityFields(entityClass, dtoContract, filterPaths);
             registerSensitiveDtoFacts(responseLineage, dtoSchemasByField);
+
+            introspectScopeAnchorAnnotations(
+                    entityClass, responseDtoClass, createDtoClass, updateDtoClass,
+                    controllerClass, serviceClass,
+                    dtoContract, createContract, updateContract
+            );
+            introspectCustodyPartitionAnnotations(
+                    entityClass, responseDtoClass, createDtoClass, updateDtoClass,
+                    controllerClass, serviceClass,
+                    dtoContract, createContract, updateContract
+            );
+            introspectMaskAnnotations(dtoContract, entityClass, controllerClass, serviceClass);
             return this;
         }
 
-        private void introspectControllerEndpoints(Class<?> controllerClass) {
+        private static boolean isDtoClass(Class<?> candidate) {
+            return candidate != null
+                    && candidate != Object.class
+                    && !Map.class.isAssignableFrom(candidate);
+        }
+
+        private void introspectTenantScopeAnnotations(
+                Class<E> entityClass,
+                Class<?> controllerClass,
+                Class<?> serviceClass
+        ) {
+            AuthzTenantScope found = null;
+            String memberFieldOverride = null;
+
+            if (serviceClass != null) {
+                found = AnnotatedElementUtils.findMergedAnnotation(serviceClass, AuthzTenantScope.class);
+            }
+            if (found == null && controllerClass != null) {
+                found = AnnotatedElementUtils.findMergedAnnotation(controllerClass, AuthzTenantScope.class);
+            }
+            if (found == null) {
+                found = AnnotatedElementUtils.findMergedAnnotation(entityClass, AuthzTenantScope.class);
+            }
+            if (found == null) {
+                for (Field field : collectEntityHierarchyFields(entityClass)) {
+                    AuthzTenantScope fieldAnn = AnnotatedElementUtils.findMergedAnnotation(field, AuthzTenantScope.class);
+                    if (fieldAnn != null) {
+                        found = fieldAnn;
+                        memberFieldOverride = field.getName();
+                        break;
+                    }
+                }
+            }
+            if (found == null) {
+                for (Method method : collectSortedHierarchyMethods(entityClass)) {
+                    if (method.getParameterCount() == 0 && method.getReturnType() != void.class) {
+                        AuthzTenantScope methodAnn = AnnotatedElementUtils.findMergedAnnotation(method, AuthzTenantScope.class);
+                        if (methodAnn != null) {
+                            found = methodAnn;
+                            memberFieldOverride = extractGetterProperty(method);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (found != null) {
+                String resolvedField = found.tenantField();
+                if ((resolvedField == null || resolvedField.isBlank() || "tenantId".equals(resolvedField))
+                        && memberFieldOverride != null && !memberFieldOverride.isBlank()) {
+                    resolvedField = memberFieldOverride;
+                }
+                if ((resolvedField == null || resolvedField.isBlank() || "tenantId".equals(resolvedField))
+                        && this.tenantFieldExplicitlySet) {
+                    resolvedField = this.tenantFieldName;
+                }
+                String resolvedSubjectFactPath = found.subjectFactPath();
+                if (found.mode() == AuthzTenantScopeMode.TENANT_ONLY
+                        && "subject.organizationUnitIds".equals(resolvedSubjectFactPath)) {
+                    resolvedSubjectFactPath = "";
+                }
+                tenantScope(new TenantScopeSpec(
+                        found.mode(),
+                        resolvedField,
+                        found.resourceFactPath(),
+                        resolvedSubjectFactPath,
+                        found.policyId(),
+                        found.ruleId(),
+                        found.allowBulkWithoutScope(),
+                        found.sharedBulkNonNullFactPath()
+                ));
+            }
+        }
+
+        private void introspectControllerEndpoints(
+                Class<?> controllerClass,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract dtoContract,
+                Class<?> responseDtoClass,
+                MetadataDtoGovernanceIntrospector introspector
+        ) {
             String basePath = resolveControllerBasePath(controllerClass);
             if (this.httpPath == null && basePath != null) {
                 this.httpPath = joinHttpPaths(basePath, this.operationKey);
             }
+
+            introspectActionRulesOnTypeAndMethods(controllerClass);
 
             for (UiSurface classSurface : AnnotatedElementUtils.findAllMergedAnnotations(controllerClass, UiSurface.class)) {
                 if (classSurface.id() != null && !classSurface.id().isBlank()) {
@@ -1649,6 +2319,15 @@ public final class AuthzResourceGovernanceSpec<E> {
                 WorkflowAction wf = AnnotatedElementUtils.findMergedAnnotation(method, WorkflowAction.class);
                 if (wf != null && wf.id() != null && !wf.id().isBlank()) {
                     String actionId = wf.id().trim();
+                    collectMethodAuthzActionRules(method, actionId, "");
+                    if (!this.operationModifiedAttributes.containsKey(actionId)
+                            || this.operationModifiedAttributes.get(actionId).isEmpty()) {
+                        Set<String> dtoAttrs = extractRequestBodyWriteAttributes(
+                                method, dtoContract, responseDtoClass, introspector);
+                        if (!dtoAttrs.isEmpty()) {
+                            this.operationModifiedAttributes.put(actionId, dtoAttrs);
+                        }
+                    }
                     if (!this.declarativeWorkflowActions.containsKey(actionId)) {
                         String actMethod = extractHttpMethod(rm, "POST");
                         String actSubPath = extractFirstPath(rm);
@@ -1665,6 +2344,7 @@ public final class AuthzResourceGovernanceSpec<E> {
                 for (UiSurface methodSurface : AnnotatedElementUtils.findAllMergedAnnotations(method, UiSurface.class)) {
                     if (methodSurface.id() != null && !methodSurface.id().isBlank()) {
                         String surfId = methodSurface.id().trim();
+                        collectMethodAuthzActionRules(method, "", surfId);
                         if (!this.declarativeUiSurfaces.containsKey(surfId)) {
                             String surfMethod = extractHttpMethod(rm, "GET");
                             String surfSubPath = extractFirstPath(rm);
@@ -1674,6 +2354,538 @@ public final class AuthzResourceGovernanceSpec<E> {
                     }
                 }
             }
+        }
+
+        private void introspectActionRulesOnTypeAndMethods(Class<?> targetClass) {
+            if (targetClass == null || targetClass == Object.class) {
+                return;
+            }
+            for (AuthzActionRule rule : AnnotatedElementUtils.findMergedRepeatableAnnotations(targetClass, AuthzActionRule.class)) {
+                actionRule(toActionRuleSpec(rule, rule.actionKey(), rule.surfaceKey()));
+            }
+            for (Method method : collectSortedHierarchyMethods(targetClass)) {
+                WorkflowAction wf = AnnotatedElementUtils.findMergedAnnotation(method, WorkflowAction.class);
+                UiSurface surf = AnnotatedElementUtils.findMergedAnnotation(method, UiSurface.class);
+                String defaultActionKey = (wf != null && wf.id() != null) ? wf.id().trim() : "";
+                String defaultSurfaceKey = (surf != null && surf.id() != null) ? surf.id().trim() : "";
+                collectMethodAuthzActionRules(method, defaultActionKey, defaultSurfaceKey);
+            }
+        }
+
+        private void collectMethodAuthzActionRules(
+                Method method,
+                String defaultActionKey,
+                String defaultSurfaceKey
+        ) {
+            for (AuthzActionRule rule : AnnotatedElementUtils.findMergedRepeatableAnnotations(method, AuthzActionRule.class)) {
+                String ak = (rule.actionKey() != null && !rule.actionKey().isBlank())
+                        ? rule.actionKey().trim()
+                        : defaultActionKey;
+                String sk = (rule.surfaceKey() != null && !rule.surfaceKey().isBlank())
+                        ? rule.surfaceKey().trim()
+                        : defaultSurfaceKey;
+                if (!ak.isEmpty() || !sk.isEmpty()) {
+                    actionRule(toActionRuleSpec(rule, ak, sk));
+                }
+            }
+        }
+
+        private static ActionRuleSpec toActionRuleSpec(
+                AuthzActionRule rule,
+                String resolvedActionKey,
+                String resolvedSurfaceKey
+        ) {
+            Set<EvaluationMode> modes = (rule.evaluationModes() == null || rule.evaluationModes().length == 0)
+                    ? Set.of()
+                    : Set.of(rule.evaluationModes());
+            Set<String> roles = new LinkedHashSet<>();
+            if (rule.requiredRoles() != null) {
+                for (String r : rule.requiredRoles()) {
+                    if (r != null && !r.isBlank()) {
+                        roles.add(r.trim());
+                    }
+                }
+            }
+            List<String> allowedVals = new ArrayList<>();
+            if (rule.conditionAllowedValues() != null) {
+                for (String v : rule.conditionAllowedValues()) {
+                    if (v != null && !v.isBlank()) {
+                        allowedVals.add(v.trim());
+                    }
+                }
+            }
+            Set<String> writes = new LinkedHashSet<>();
+            if (rule.allowedWriteAttributes() != null) {
+                for (String w : rule.allowedWriteAttributes()) {
+                    if (w != null && !w.isBlank()) {
+                        writes.add(w.trim());
+                    }
+                }
+            }
+            return new ActionRuleSpec(
+                    resolvedActionKey,
+                    resolvedSurfaceKey,
+                    rule.ruleId(),
+                    rule.policyId(),
+                    modes,
+                    rule.requireAuthenticatedPrincipal(),
+                    roles,
+                    rule.conditionFactPath(),
+                    allowedVals,
+                    rule.conditionJsonLogic(),
+                    writes,
+                    rule.reasonCode(),
+                    rule.auditRequired(),
+                    rule.auditCategory(),
+                    rule.legalPurpose(),
+                    rule.legalBasisRef(),
+                    rule.description()
+            );
+        }
+
+        private Set<String> extractRequestBodyWriteAttributes(
+                Method method,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                Class<?> responseDtoClass,
+                MetadataDtoGovernanceIntrospector introspector
+        ) {
+            Set<String> attrs = new LinkedHashSet<>();
+            for (java.lang.reflect.Parameter param : method.getParameters()) {
+                if (AnnotatedElementUtils.hasAnnotation(param, RequestBody.class)) {
+                    Class<?> bodyType = param.getType();
+                    if (isDtoClass(bodyType)
+                            && !bodyType.isPrimitive()
+                            && !CharSequence.class.isAssignableFrom(bodyType)
+                            && !Number.class.isAssignableFrom(bodyType)
+                            && !Collection.class.isAssignableFrom(bodyType)) {
+                        var cmdContract = introspector.introspectWriteDto(bodyType, responseDtoClass, this.resourceKey);
+                        for (DtoFieldSchemaMetadata schema : cmdContract.fieldSchemas()) {
+                            attrs.add(schema.attributeId());
+                        }
+                    }
+                }
+            }
+            return attrs;
+        }
+
+        private void introspectScopeAnchorAnnotations(
+                Class<E> entityClass,
+                Class<?> responseDtoClass,
+                Class<?> createDtoClass,
+                Class<?> updateDtoClass,
+                Class<?> controllerClass,
+                Class<?> serviceClass,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract
+        ) {
+            for (Class<?> ownerType : List.of(
+                    nonNullOrVoid(serviceClass),
+                    nonNullOrVoid(controllerClass),
+                    nonNullOrVoid(entityClass),
+                    nonNullOrVoid(responseDtoClass),
+                    nonNullOrVoid(createDtoClass),
+                    nonNullOrVoid(updateDtoClass))) {
+                if (ownerType == Void.class) {
+                    continue;
+                }
+                for (AuthzScopeAnchor anchor : AnnotatedElementUtils.findMergedRepeatableAnnotations(ownerType, AuthzScopeAnchor.class)) {
+                    if (anchor.attributeId() != null && !anchor.attributeId().isBlank()) {
+                        String attrId = anchor.attributeId().trim();
+                        scopeAnchor(new ScopeAnchorSpec(
+                                attrId,
+                                anchor.factPath(),
+                                anchor.requiredOnCreate(),
+                                anchor.forbidClearOnUpdate(),
+                                anchor.immutableAfterCreate(),
+                                anchor.reason()
+                        ));
+                        if (anchor.immutableAfterCreate() && isTenantFieldAttribute(attrId, responseContract)) {
+                            this.immutableTenantAnchor = true;
+                        }
+                    }
+                }
+            }
+
+            scanMemberScopeAnchors(entityClass, responseContract, createContract, updateContract);
+            scanMemberScopeAnchors(responseDtoClass, responseContract, createContract, updateContract);
+            scanMemberScopeAnchors(createDtoClass, responseContract, createContract, updateContract);
+            scanMemberScopeAnchors(updateDtoClass, responseContract, createContract, updateContract);
+        }
+
+        private void scanMemberScopeAnchors(
+                Class<?> type,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract
+        ) {
+            if (!isDtoClass(type)) {
+                return;
+            }
+            if (type.isRecord()) {
+                for (RecordComponent rc : type.getRecordComponents()) {
+                    processMemberScopeAnchors(rc, rc.getName(), responseContract, createContract, updateContract);
+                    if (rc.getAccessor() != null) {
+                        processMemberScopeAnchors(rc.getAccessor(), rc.getName(), responseContract, createContract, updateContract);
+                    }
+                }
+            }
+            for (Field f : collectEntityHierarchyFields(type)) {
+                processMemberScopeAnchors(f, f.getName(), responseContract, createContract, updateContract);
+            }
+            for (Method m : collectSortedHierarchyMethods(type)) {
+                if (m.getParameterCount() == 0 && m.getReturnType() != void.class) {
+                    String prop = extractGetterProperty(m);
+                    if (prop != null) {
+                        processMemberScopeAnchors(m, prop, responseContract, createContract, updateContract);
+                    }
+                }
+            }
+        }
+
+        private void processMemberScopeAnchors(
+                AnnotatedElement el,
+                String propertyName,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract
+        ) {
+            for (AuthzScopeAnchor anchor : AnnotatedElementUtils.findMergedRepeatableAnnotations(el, AuthzScopeAnchor.class)) {
+                String attrId = resolveMemberAttributeId(
+                        anchor.attributeId(), el, propertyName, responseContract, createContract, updateContract);
+                String factPath = (anchor.factPath() != null && !anchor.factPath().isBlank())
+                        ? anchor.factPath().trim()
+                        : "resource." + propertyName;
+                scopeAnchor(new ScopeAnchorSpec(
+                        attrId,
+                        factPath,
+                        anchor.requiredOnCreate(),
+                        anchor.forbidClearOnUpdate(),
+                        anchor.immutableAfterCreate(),
+                        anchor.reason()
+                ));
+                if (anchor.immutableAfterCreate() && propertyName.equals(this.tenantFieldName)) {
+                    this.immutableTenantAnchor = true;
+                }
+            }
+        }
+
+        private boolean isTenantFieldAttribute(
+                String attributeId,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract
+        ) {
+            if (this.tenantFieldName == null) {
+                return false;
+            }
+            String expected = resolveAttributeIdForPath(this.tenantFieldName, responseContract);
+            return attributeId.equals(expected);
+        }
+
+        private void introspectCustodyPartitionAnnotations(
+                Class<E> entityClass,
+                Class<?> responseDtoClass,
+                Class<?> createDtoClass,
+                Class<?> updateDtoClass,
+                Class<?> controllerClass,
+                Class<?> serviceClass,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract
+        ) {
+            AuthzDelegationSplitMode mode = AuthzDelegationSplitMode.ORIGIN_DESTINATION_SPLIT;
+            boolean hasPartition = false;
+            String originField = this.originEntityFieldPath;
+            String originFact = null;
+            String originSubj = this.originSubjectFactKey;
+            String destField = this.destinationEntityFieldPath;
+            String destFact = null;
+            String destSubj = this.destinationSubjectFactKey;
+            Set<String> originWrites = new LinkedHashSet<>();
+            Set<String> destWrites = new LinkedHashSet<>();
+
+            if (this.dualScopeDelegationSpec != null) {
+                hasPartition = true;
+                originFact = this.dualScopeDelegationSpec.originFactPath();
+                destFact = this.dualScopeDelegationSpec.destinationFactPath();
+                originWrites.addAll(this.dualScopeDelegationSpec.originExclusiveWriteAttributes());
+                destWrites.addAll(this.dualScopeDelegationSpec.destinationAllowedWriteAttributes());
+            }
+
+            for (Class<?> ownerType : List.of(
+                    nonNullOrVoid(serviceClass),
+                    nonNullOrVoid(controllerClass),
+                    nonNullOrVoid(entityClass),
+                    nonNullOrVoid(responseDtoClass),
+                    nonNullOrVoid(createDtoClass),
+                    nonNullOrVoid(updateDtoClass))) {
+                if (ownerType == Void.class) {
+                    continue;
+                }
+                AuthzCustodyPartition typeAnn = AnnotatedElementUtils.findMergedAnnotation(ownerType, AuthzCustodyPartition.class);
+                if (typeAnn != null) {
+                    hasPartition = true;
+                    mode = typeAnn.mode();
+                    if (!typeAnn.originEntityField().isBlank() && originField == null) {
+                        originField = typeAnn.originEntityField().trim();
+                    }
+                    if (!typeAnn.originFactPath().isBlank() && originFact == null) {
+                        originFact = typeAnn.originFactPath().trim();
+                    }
+                    if (!typeAnn.originSubjectFactKey().isBlank() && originSubj == null) {
+                        originSubj = typeAnn.originSubjectFactKey().trim();
+                    }
+                    if (!typeAnn.destinationEntityField().isBlank() && destField == null) {
+                        destField = typeAnn.destinationEntityField().trim();
+                    }
+                    if (!typeAnn.destinationFactPath().isBlank() && destFact == null) {
+                        destFact = typeAnn.destinationFactPath().trim();
+                    }
+                    if (!typeAnn.destinationSubjectFactKey().isBlank() && destSubj == null) {
+                        destSubj = typeAnn.destinationSubjectFactKey().trim();
+                    }
+                    for (String a : typeAnn.originExclusiveWriteAttributes()) {
+                        if (a != null && !a.isBlank()) {
+                            originWrites.add(a.trim());
+                        }
+                    }
+                    for (String a : typeAnn.destinationAllowedWriteAttributes()) {
+                        if (a != null && !a.isBlank()) {
+                            destWrites.add(a.trim());
+                        }
+                    }
+                }
+            }
+
+            List<MemberCustodyInfo> memberInfos = new ArrayList<>();
+            collectMemberCustodyInfo(entityClass, responseContract, createContract, updateContract, memberInfos);
+            collectMemberCustodyInfo(responseDtoClass, responseContract, createContract, updateContract, memberInfos);
+            collectMemberCustodyInfo(createDtoClass, responseContract, createContract, updateContract, memberInfos);
+            collectMemberCustodyInfo(updateDtoClass, responseContract, createContract, updateContract, memberInfos);
+
+            for (MemberCustodyInfo info : memberInfos) {
+                hasPartition = true;
+                AuthzCustodyPartition ann = info.ann();
+                if (ann.custodyAnchor()) {
+                    if (ann.role() == AuthzCustodyRole.ORIGIN) {
+                        if (originField == null) {
+                            originField = info.propertyName();
+                        }
+                        if (originFact == null) {
+                            originFact = !ann.originFactPath().isBlank()
+                                    ? ann.originFactPath().trim()
+                                    : "resource." + info.propertyName();
+                        }
+                        if (originSubj == null && !ann.subjectFactPath().isBlank()) {
+                            originSubj = ann.subjectFactPath().trim();
+                        }
+                    } else if (ann.role() == AuthzCustodyRole.DESTINATION) {
+                        if (destField == null) {
+                            destField = info.propertyName();
+                        }
+                        if (destFact == null) {
+                            destFact = !ann.destinationFactPath().isBlank()
+                                    ? ann.destinationFactPath().trim()
+                                    : "resource." + info.propertyName();
+                        }
+                        if (destSubj == null && !ann.subjectFactPath().isBlank()) {
+                            destSubj = ann.subjectFactPath().trim();
+                        }
+                    }
+                } else {
+                    if (ann.role() == AuthzCustodyRole.ORIGIN) {
+                        originWrites.add(info.attributeId());
+                    } else if (ann.role() == AuthzCustodyRole.DESTINATION) {
+                        destWrites.add(info.attributeId());
+                    }
+                }
+            }
+
+            if (!hasPartition) {
+                return;
+            }
+            if (originFact == null && originField != null) {
+                originFact = "resource." + originField;
+            }
+            if (destFact == null && destField != null) {
+                destFact = "resource." + destField;
+            }
+            if (originField != null && originSubj == null) {
+                originSubj = (this.tenantScopeSpec != null
+                        && originField.equals(this.tenantFieldName)
+                        && !this.tenantScopeSpec.subjectFactPath().isBlank())
+                        ? this.tenantScopeSpec.subjectFactPath()
+                        : "subject.originUnitIds";
+            }
+            if (destField != null && destSubj == null) {
+                destSubj = "subject.destinationUnitIds";
+            }
+            if (originField != null && originSubj != null && this.originEntityFieldPath == null) {
+                originCustody(originField, originSubj);
+            }
+            if (destField != null && destSubj != null && this.destinationEntityFieldPath == null) {
+                destinationCustody(destField, destSubj);
+            }
+            if (originFact != null && destFact != null && this.dualScopeDelegationSpec == null) {
+                dualScopeDelegationSpec(DualScopeDelegationSpec.ofOriginAndDestination(
+                        mode.name(),
+                        originFact,
+                        destFact,
+                        originWrites,
+                        destWrites
+                ));
+            }
+        }
+
+        private record MemberCustodyInfo(String propertyName, String attributeId, AuthzCustodyPartition ann) {}
+
+        private void collectMemberCustodyInfo(
+                Class<?> type,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract,
+                List<MemberCustodyInfo> target
+        ) {
+            if (!isDtoClass(type)) {
+                return;
+            }
+            if (type.isRecord()) {
+                for (RecordComponent rc : type.getRecordComponents()) {
+                    addCustodyIfPresent(rc, rc.getName(), responseContract, createContract, updateContract, target);
+                    if (rc.getAccessor() != null) {
+                        addCustodyIfPresent(rc.getAccessor(), rc.getName(), responseContract, createContract, updateContract, target);
+                    }
+                }
+            }
+            for (Field f : collectEntityHierarchyFields(type)) {
+                addCustodyIfPresent(f, f.getName(), responseContract, createContract, updateContract, target);
+            }
+            for (Method m : collectSortedHierarchyMethods(type)) {
+                if (m.getParameterCount() == 0 && m.getReturnType() != void.class) {
+                    String prop = extractGetterProperty(m);
+                    if (prop != null) {
+                        addCustodyIfPresent(m, prop, responseContract, createContract, updateContract, target);
+                    }
+                }
+            }
+        }
+
+        private void addCustodyIfPresent(
+                AnnotatedElement el,
+                String propertyName,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract,
+                List<MemberCustodyInfo> target
+        ) {
+            AuthzCustodyPartition ann = AnnotatedElementUtils.findMergedAnnotation(el, AuthzCustodyPartition.class);
+            if (ann == null) {
+                return;
+            }
+            String attrId = resolveMemberAttributeId(
+                    ann.attributeId(), el, propertyName, responseContract, createContract, updateContract);
+            target.add(new MemberCustodyInfo(propertyName, attrId, ann));
+        }
+
+        private void introspectMaskAnnotations(
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract dtoContract,
+                Class<E> entityClass,
+                Class<?> controllerClass,
+                Class<?> serviceClass
+        ) {
+            Set<String> explicitAttrIds = new LinkedHashSet<>();
+            Set<String> seenKeys = new LinkedHashSet<>();
+
+            for (Class<?> ownerType : List.of(
+                    nonNullOrVoid(serviceClass),
+                    nonNullOrVoid(controllerClass),
+                    nonNullOrVoid(entityClass))) {
+                if (ownerType == Void.class) {
+                    continue;
+                }
+                for (AuthzMask mask : AnnotatedElementUtils.findMergedRepeatableAnnotations(ownerType, AuthzMask.class)) {
+                    if (mask.attributeId() != null && !mask.attributeId().isBlank()) {
+                        DeclaredMaskSpec spec = MetadataDtoGovernanceIntrospector.toDeclaredMaskSpec(
+                                mask, mask.attributeId().trim());
+                        addUniqueMaskSpec(spec, explicitAttrIds, seenKeys);
+                    }
+                }
+            }
+
+            if (dtoContract != null) {
+                for (DeclaredMaskSpec declared : dtoContract.declaredMasks()) {
+                    addUniqueMaskSpec(declared, explicitAttrIds, seenKeys);
+                }
+                for (MaskContributionSpec derived : dtoContract.derivedMasks()) {
+                    Set<String> attrs = derived.fieldSelector() != null
+                            ? derived.fieldSelector().attributeIds()
+                            : Set.of();
+                    boolean overridden = !attrs.isEmpty() && attrs.stream().allMatch(explicitAttrIds::contains);
+                    if (!overridden) {
+                        DeclaredMaskSpec spec = new DeclaredMaskSpec(
+                                derived,
+                                Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET),
+                                Set.of(),
+                                "Derived automatically from @DomainGovernance classification"
+                        );
+                        addUniqueMaskSpec(spec, explicitAttrIds, seenKeys);
+                    }
+                }
+            }
+        }
+
+        private void addUniqueMaskSpec(
+                DeclaredMaskSpec spec,
+                Set<String> explicitAttrIds,
+                Set<String> seenKeys
+        ) {
+            Set<String> attrs = spec.contribution().fieldSelector() != null
+                    ? spec.contribution().fieldSelector().attributeIds()
+                    : Set.of();
+            String key = attrs + "|" + spec.contribution().strategyId() + "|" + spec.surfaces() + "|" + spec.modes();
+            if (seenKeys.add(key)) {
+                this.maskSpecs.add(spec);
+                explicitAttrIds.addAll(attrs);
+            }
+        }
+
+        private String resolveMemberAttributeId(
+                String explicitAttributeId,
+                AnnotatedElement el,
+                String propertyName,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract responseContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract createContract,
+                MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract updateContract
+        ) {
+            if (explicitAttributeId != null && !explicitAttributeId.isBlank()) {
+                return explicitAttributeId.trim();
+            }
+            DomainLineage lineage = AnnotatedElementUtils.findMergedAnnotation(el, DomainLineage.class);
+            if (lineage != null && lineage.attributeId() != null && !lineage.attributeId().isBlank()) {
+                return lineage.attributeId().trim();
+            }
+            for (var contract : List.of(
+                    responseContract != null ? responseContract : emptyContract(),
+                    createContract != null ? createContract : emptyContract(),
+                    updateContract != null ? updateContract : emptyContract())) {
+                String mapped = contract.wirePointerToAttributeIdMap().get("/" + propertyName);
+                if (mapped != null) {
+                    return mapped;
+                }
+            }
+            return resolveAttributeIdForPath(propertyName, responseContract);
+        }
+
+        private MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract emptyContract() {
+            return new MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract(
+                    this.resourceKey, Object.class, List.of(), Set.of(), Set.of(), List.of(), Map.of());
+        }
+
+        private static Class<?> nonNullOrVoid(Class<?> clazz) {
+            return clazz == null ? Void.class : clazz;
+        }
+
+        private void introspectControllerEndpoints(Class<?> controllerClass) {
+            introspectControllerEndpoints(controllerClass, null, null, null);
         }
 
         private void introspectEntityFields(
@@ -1719,7 +2931,8 @@ public final class AuthzResourceGovernanceSpec<E> {
                             defaultOperatorsForValueType(valueType),
                             nullable
                     );
-                    if (fieldName.equals(this.tenantFieldName)) {
+                    if (fieldName.equals(this.tenantFieldName)
+                            && this.tenantScopeMode != AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
                         this.mandatoryScopeAnchorAttributeIds.add(attributeId);
                     }
                 }
@@ -2227,11 +3440,103 @@ public final class AuthzResourceGovernanceSpec<E> {
                         )
                 );
                 facts.putAll(this.declarativeFacts);
-                if (this.cedenteSubjectFactKey != null && this.cedenteSubjectFactKey.startsWith("subject.")) {
+                boolean requiresSubjectRoles = this.actionRuleSpecs.values().stream()
+                        .anyMatch(r -> !r.requiredRoles().isEmpty())
+                        || this.surfaceRuleSpecs.values().stream().anyMatch(r -> !r.requiredRoles().isEmpty());
+                if (requiresSubjectRoles) {
                     facts.putIfAbsent(
-                            this.cedenteSubjectFactKey,
+                            "subject.roles",
                             new FactDescriptor(
-                                    this.cedenteSubjectFactKey,
+                                    "subject.roles",
+                                    FactSlotNamespace.SUBJECT,
+                                    FactValueType.STRING,
+                                    FactCardinality.SET,
+                                    FactPresenceModel.ALWAYS_PRESENT,
+                                    null,
+                                    null,
+                                    FactResolutionStage.EXTRACT,
+                                    Set.of(ContextEvaluationPhase.ADMISSION, ContextEvaluationPhase.TARGET),
+                                    false,
+                                    "INTERNAL",
+                                    "OPERATIONAL",
+                                    Set.of(),
+                                    legalBasis,
+                                    null
+                            )
+                    );
+                }
+                if (this.tenantScopeSpec != null
+                        && this.tenantScopeSpec.subjectFactPath().startsWith("subject.")
+                        && !"subject.principalId".equals(this.tenantScopeSpec.subjectFactPath())
+                        && !"subject.organizationUnitIds".equals(this.tenantScopeSpec.subjectFactPath())) {
+                    facts.putIfAbsent(
+                            this.tenantScopeSpec.subjectFactPath(),
+                            new FactDescriptor(
+                                    this.tenantScopeSpec.subjectFactPath(),
+                                    FactSlotNamespace.SUBJECT,
+                                    this.tenantScopeMode == AuthzTenantScopeMode.TENANT_ONLY
+                                            ? FactValueType.STRING
+                                            : FactValueType.INT64,
+                                    this.tenantScopeMode == AuthzTenantScopeMode.TENANT_ONLY
+                                            ? FactCardinality.SCALAR
+                                            : FactCardinality.SET,
+                                    FactPresenceModel.ALWAYS_PRESENT,
+                                    null,
+                                    null,
+                                    FactResolutionStage.ENRICH,
+                                    Set.of(ContextEvaluationPhase.ADMISSION, ContextEvaluationPhase.TARGET),
+                                    false,
+                                    "INTERNAL",
+                                    "OPERATIONAL",
+                                    Set.of(),
+                                    legalBasis,
+                                    null
+                            )
+                    );
+                }
+                if (this.tenantScopeSpec != null
+                        && this.tenantScopeSpec.mode() != AuthzTenantScopeMode.AUTHENTICATED_SHARED
+                        && this.tenantScopeSpec.resourceFactPath().startsWith("resource.")) {
+                    facts.putIfAbsent(
+                            this.tenantScopeSpec.resourceFactPath(),
+                            new FactDescriptor(
+                                    this.tenantScopeSpec.resourceFactPath(),
+                                    FactSlotNamespace.RESOURCE,
+                                    this.tenantScopeSpec.mode() == AuthzTenantScopeMode.TENANT_ONLY
+                                            ? FactValueType.STRING
+                                            : FactValueType.INT64,
+                                    FactCardinality.SCALAR,
+                                    FactPresenceModel.MAY_BE_ABSENT,
+                                    this.tenantScopeSpec.tenantField(),
+                                    null,
+                                    FactResolutionStage.EXTRACT,
+                                    Set.of(ContextEvaluationPhase.TARGET),
+                                    true,
+                                    "INTERNAL",
+                                    "OPERATIONAL",
+                                    Set.of(),
+                                    legalBasis,
+                                    null
+                            )
+                    );
+                }
+                if (this.tenantScopeSpec != null
+                        && !this.tenantScopeSpec.sharedBulkNonNullFactPath().isBlank()) {
+                    putSyntheticRuleFactIfAbsent(facts, this.tenantScopeSpec.sharedBulkNonNullFactPath(), legalBasis);
+                }
+                for (ActionRuleSpec rule : this.actionRuleSpecs.values()) {
+                    putSyntheticRuleFactIfAbsent(facts, rule.conditionFactPath(), legalBasis);
+                    putSyntheticJsonLogicFactsIfAbsent(facts, rule.conditionJsonLogic(), legalBasis);
+                }
+                for (ActionRuleSpec rule : this.surfaceRuleSpecs.values()) {
+                    putSyntheticRuleFactIfAbsent(facts, rule.conditionFactPath(), legalBasis);
+                    putSyntheticJsonLogicFactsIfAbsent(facts, rule.conditionJsonLogic(), legalBasis);
+                }
+                if (this.originSubjectFactKey != null && this.originSubjectFactKey.startsWith("subject.")) {
+                    facts.putIfAbsent(
+                            this.originSubjectFactKey,
+                            new FactDescriptor(
+                                    this.originSubjectFactKey,
                                     FactSlotNamespace.SUBJECT,
                                     FactValueType.INT64,
                                     FactCardinality.SET,
@@ -2249,11 +3554,11 @@ public final class AuthzResourceGovernanceSpec<E> {
                             )
                     );
                 }
-                if (this.cessionarioSubjectFactKey != null && this.cessionarioSubjectFactKey.startsWith("subject.")) {
+                if (this.destinationSubjectFactKey != null && this.destinationSubjectFactKey.startsWith("subject.")) {
                     facts.putIfAbsent(
-                            this.cessionarioSubjectFactKey,
+                            this.destinationSubjectFactKey,
                             new FactDescriptor(
-                                    this.cessionarioSubjectFactKey,
+                                    this.destinationSubjectFactKey,
                                     FactSlotNamespace.SUBJECT,
                                     FactValueType.INT64,
                                     FactCardinality.SET,
@@ -2272,12 +3577,12 @@ public final class AuthzResourceGovernanceSpec<E> {
                     );
                 }
                 if (this.dualScopeDelegationSpec != null) {
-                    String cedFact = this.dualScopeDelegationSpec.cedenteFactPath();
-                    if (cedFact != null && cedFact.startsWith("resource.")) {
+                    String origFact = this.dualScopeDelegationSpec.originFactPath();
+                    if (origFact != null && origFact.startsWith("resource.")) {
                         facts.putIfAbsent(
-                                cedFact,
+                                origFact,
                                 new FactDescriptor(
-                                        cedFact,
+                                        origFact,
                                         FactSlotNamespace.RESOURCE,
                                         FactValueType.INT64,
                                         FactCardinality.SCALAR,
@@ -2295,12 +3600,12 @@ public final class AuthzResourceGovernanceSpec<E> {
                                 )
                         );
                     }
-                    String cesFact = this.dualScopeDelegationSpec.cessionarioFactPath();
-                    if (cesFact != null && cesFact.startsWith("resource.")) {
+                    String destFact = this.dualScopeDelegationSpec.destinationFactPath();
+                    if (destFact != null && destFact.startsWith("resource.")) {
                         facts.putIfAbsent(
-                                cesFact,
+                                destFact,
                                 new FactDescriptor(
-                                        cesFact,
+                                        destFact,
                                         FactSlotNamespace.RESOURCE,
                                         FactValueType.INT64,
                                         FactCardinality.SCALAR,
@@ -2332,11 +3637,11 @@ public final class AuthzResourceGovernanceSpec<E> {
                     }
                 }
                 if (this.dualScopeDelegationSpec != null) {
-                    if (this.dualScopeDelegationSpec.cedenteExclusiveWriteAttributes() != null) {
-                        declaredWriteOrAnchorAttrs.addAll(this.dualScopeDelegationSpec.cedenteExclusiveWriteAttributes());
+                    if (this.dualScopeDelegationSpec.originExclusiveWriteAttributes() != null) {
+                        declaredWriteOrAnchorAttrs.addAll(this.dualScopeDelegationSpec.originExclusiveWriteAttributes());
                     }
-                    if (this.dualScopeDelegationSpec.cessionarioAllowedWriteAttributes() != null) {
-                        declaredWriteOrAnchorAttrs.addAll(this.dualScopeDelegationSpec.cessionarioAllowedWriteAttributes());
+                    if (this.dualScopeDelegationSpec.destinationAllowedWriteAttributes() != null) {
+                        declaredWriteOrAnchorAttrs.addAll(this.dualScopeDelegationSpec.destinationAllowedWriteAttributes());
                     }
                 }
                 for (String attrId : declaredWriteOrAnchorAttrs) {
@@ -2470,16 +3775,27 @@ public final class AuthzResourceGovernanceSpec<E> {
                         Set<EvaluationMode> actModes = act.bulkCollectionScope()
                                 ? Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET)
                                 : Set.of(EvaluationMode.TARGET);
-                        Set<EnforcementCapability> actCapabilities = act.bulkCollectionScope()
-                                ? Set.of(
-                                        EnforcementCapability.ACCESS,
-                                        EnforcementCapability.DATA_SCOPE,
-                                        EnforcementCapability.FIELD_WRITE
-                                )
-                                : Set.of(
-                                        EnforcementCapability.ACCESS,
-                                        EnforcementCapability.FIELD_WRITE
-                                );
+                        ActionRuleSpec ruleSpec = this.actionRuleSpecs.get(act.actionKey());
+                        boolean explicitNoFieldWrites = ruleSpec != null
+                                && ruleSpec.allowedWriteAttributes().isEmpty()
+                                && this.operationModifiedAttributes.getOrDefault(act.actionKey(), Set.of()).isEmpty();
+                        Set<EnforcementCapability> actCapabilities;
+                        if (act.bulkCollectionScope()) {
+                            actCapabilities = explicitNoFieldWrites
+                                    ? Set.of(EnforcementCapability.ACCESS, EnforcementCapability.DATA_SCOPE)
+                                    : Set.of(
+                                            EnforcementCapability.ACCESS,
+                                            EnforcementCapability.DATA_SCOPE,
+                                            EnforcementCapability.FIELD_WRITE
+                                    );
+                        } else {
+                            actCapabilities = explicitNoFieldWrites
+                                    ? Set.of(EnforcementCapability.ACCESS)
+                                    : Set.of(
+                                            EnforcementCapability.ACCESS,
+                                            EnforcementCapability.FIELD_WRITE
+                                    );
+                        }
                         return new DecisionPointDescriptor(
                                 DecisionPointDescriptor.SCHEMA_VERSION_V1,
                                 actId,
@@ -2547,6 +3863,99 @@ public final class AuthzResourceGovernanceSpec<E> {
                 }
             }
             return new AuthzResourceGovernanceSpec<>(this);
+        }
+
+        private static void putSyntheticJsonLogicFactsIfAbsent(
+                Map<String, FactDescriptor> facts,
+                String conditionJsonLogic,
+                String legalBasis
+        ) {
+            if (conditionJsonLogic == null || conditionJsonLogic.isBlank()) {
+                return;
+            }
+            try {
+                com.fasterxml.jackson.databind.JsonNode root =
+                        new com.fasterxml.jackson.databind.ObjectMapper().readTree(conditionJsonLogic);
+                collectJsonLogicVars(root, facts, legalBasis);
+            } catch (Exception ignored) {
+                // Invalid JSON-Logic will be caught with clear context during policy synthesis/compilation.
+            }
+        }
+
+        private static void collectJsonLogicVars(
+                com.fasterxml.jackson.databind.JsonNode node,
+                Map<String, FactDescriptor> facts,
+                String legalBasis
+        ) {
+            if (node == null) {
+                return;
+            }
+            if (node.isObject()) {
+                if (node.has("var") && node.get("var").isTextual()) {
+                    putSyntheticRuleFactIfAbsent(facts, node.get("var").asText(), legalBasis);
+                }
+                node.fields().forEachRemaining(e -> collectJsonLogicVars(e.getValue(), facts, legalBasis));
+            } else if (node.isArray()) {
+                for (com.fasterxml.jackson.databind.JsonNode child : node) {
+                    collectJsonLogicVars(child, facts, legalBasis);
+                }
+            }
+        }
+
+        private static void putSyntheticRuleFactIfAbsent(
+                Map<String, FactDescriptor> facts,
+                String factPath,
+                String legalBasis
+        ) {
+            if (factPath == null || factPath.isBlank()) {
+                return;
+            }
+            String trimmed = factPath.trim();
+            FactSlotNamespace ns;
+            FactResolutionStage stage;
+            Set<ContextEvaluationPhase> phases;
+            boolean resourceAttr = false;
+            if (trimmed.startsWith("subject.")) {
+                ns = FactSlotNamespace.SUBJECT;
+                stage = FactResolutionStage.ENRICH;
+                phases = Set.of(ContextEvaluationPhase.ADMISSION, ContextEvaluationPhase.TARGET);
+            } else if (trimmed.startsWith("resource.")) {
+                ns = FactSlotNamespace.RESOURCE;
+                stage = FactResolutionStage.EXTRACT;
+                phases = Set.of(ContextEvaluationPhase.TARGET);
+                resourceAttr = true;
+            } else if (trimmed.startsWith("action.")) {
+                ns = FactSlotNamespace.ACTION;
+                stage = FactResolutionStage.EXTRACT;
+                phases = Set.of(ContextEvaluationPhase.ADMISSION, ContextEvaluationPhase.TARGET);
+            } else if (trimmed.startsWith("context.")) {
+                ns = FactSlotNamespace.CONTEXT;
+                stage = FactResolutionStage.EXTRACT;
+                phases = Set.of(ContextEvaluationPhase.ADMISSION, ContextEvaluationPhase.TARGET);
+            } else {
+                return;
+            }
+            String attrId = resourceAttr ? trimmed.substring("resource.".length()) : null;
+            facts.putIfAbsent(
+                    trimmed,
+                    new FactDescriptor(
+                            trimmed,
+                            ns,
+                            FactValueType.STRING,
+                            FactCardinality.SCALAR,
+                            FactPresenceModel.MAY_BE_ABSENT,
+                            attrId,
+                            null,
+                            stage,
+                            phases,
+                            resourceAttr,
+                            "INTERNAL",
+                            "OPERATIONAL",
+                            Set.of(),
+                            legalBasis,
+                            null
+                    )
+            );
         }
     }
 }

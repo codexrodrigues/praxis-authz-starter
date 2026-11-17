@@ -652,6 +652,912 @@ public final class AuthzHostPolicyBootstrapBuilder {
     }
 
     /**
+     * Synthesizes and registers zero-config baseline authorization, data-scope, field-masking,
+     * workflow-action, and UI-surface policies directly from an annotation-introspected
+     * {@link AuthzResourceGovernanceSpec} ({@code Wave 1.4B}).
+     *
+     * <p>Masks are drawn from {@link AuthzResourceGovernanceSpec#maskSpecs()} (combining explicit
+     * {@link org.praxisplatform.authz.contracts.annotation.AuthzMask} declarations and auto-derived
+     * {@link org.praxisplatform.uischema.annotation.DomainGovernance} redactions). Disjunctive role
+     * and rule conditions keep {@code "or"} at the JSON-Logic root so {@code RegoV1PolicyCompiler}
+     * always materializes real Rego rules.</p>
+     *
+     * @param spec target governed resource specification
+     * @return this builder
+     */
+    public AuthzHostPolicyBootstrapBuilder addAnnotatedResource(AuthzResourceGovernanceSpec<?> spec) {
+        return addAnnotatedResource(spec, null, null, null);
+    }
+
+    /**
+     * Synthesizes and registers zero-config policies from {@code spec}, optionally augmenting
+     * masking directives by introspecting additional response/create/update DTO classes.
+     *
+     * @param spec target governed resource specification
+     * @param responseDtoClass optional response DTO class for additional {@code @AuthzMask}/{@code @DomainGovernance} masks
+     * @param createDtoClass optional create DTO class
+     * @param updateDtoClass optional update DTO class
+     * @return this builder
+     */
+    public AuthzHostPolicyBootstrapBuilder addAnnotatedResource(
+            AuthzResourceGovernanceSpec<?> spec,
+            Class<?> responseDtoClass,
+            Class<?> createDtoClass,
+            Class<?> updateDtoClass
+    ) {
+        Objects.requireNonNull(spec, "spec is required");
+        addResourceSpec(spec, responseDtoClass, createDtoClass, updateDtoClass);
+        List<MetadataDtoGovernanceIntrospector.DeclaredMaskSpec> effectiveMasks =
+                collectEffectiveMasks(spec, responseDtoClass, createDtoClass, updateDtoClass);
+        synthesizeAnnotatedPrimaryScopePolicy(spec, effectiveMasks);
+        synthesizeAnnotatedActionPolicies(spec);
+        synthesizeAnnotatedSurfacePolicies(spec, effectiveMasks);
+        return this;
+    }
+
+    /**
+     * Registers zero-config baseline policies for all supplied {@link AuthzResourceGovernanceSpec}s.
+     *
+     * @param specs governed resource specifications
+     * @return this builder
+     */
+    public AuthzHostPolicyBootstrapBuilder addAnnotatedResources(
+            java.util.Collection<? extends AuthzResourceGovernanceSpec<?>> specs
+    ) {
+        Objects.requireNonNull(specs, "specs is required");
+        for (AuthzResourceGovernanceSpec<?> spec : specs) {
+            if (spec != null) {
+                addAnnotatedResource(spec);
+            }
+        }
+        return this;
+    }
+
+    private List<MetadataDtoGovernanceIntrospector.DeclaredMaskSpec> collectEffectiveMasks(
+            AuthzResourceGovernanceSpec<?> spec,
+            Class<?> responseDtoClass,
+            Class<?> createDtoClass,
+            Class<?> updateDtoClass
+    ) {
+        List<MetadataDtoGovernanceIntrospector.DeclaredMaskSpec> merged = new ArrayList<>(spec.maskSpecs());
+        Set<String> coveredAttributes = new java.util.LinkedHashSet<>();
+        for (MetadataDtoGovernanceIntrospector.DeclaredMaskSpec mask : merged) {
+            if (mask.contribution().fieldSelector() != null
+                    && mask.contribution().fieldSelector().attributeIds() != null) {
+                coveredAttributes.addAll(mask.contribution().fieldSelector().attributeIds());
+            }
+        }
+        MetadataDtoGovernanceIntrospector introspector = new MetadataDtoGovernanceIntrospector();
+        Class<?> fallbackResponse = responseDtoClass;
+        for (Class<?> dto : new Class<?>[] {responseDtoClass, createDtoClass, updateDtoClass}) {
+            if (dto == null) {
+                continue;
+            }
+            var contract = dto == responseDtoClass
+                    ? introspector.introspect(dto, spec.resourceKey())
+                    : introspector.introspectWriteDto(dto, fallbackResponse, spec.resourceKey());
+            for (MetadataDtoGovernanceIntrospector.DeclaredMaskSpec declared : contract.declaredMasks()) {
+                Set<String> attrs = declared.contribution().fieldSelector() != null
+                        ? declared.contribution().fieldSelector().attributeIds()
+                        : Set.of();
+                if (attrs.isEmpty() || !coveredAttributes.containsAll(attrs)) {
+                    merged.add(declared);
+                    coveredAttributes.addAll(attrs);
+                }
+            }
+            for (MaskContributionSpec derived : contract.derivedMasks()) {
+                Set<String> attrs = derived.fieldSelector() != null
+                        ? derived.fieldSelector().attributeIds()
+                        : Set.of();
+                if (!attrs.isEmpty() && !coveredAttributes.containsAll(attrs)) {
+                    merged.add(new MetadataDtoGovernanceIntrospector.DeclaredMaskSpec(
+                            derived,
+                            Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET),
+                            Set.of(),
+                            "Auto-derived from @DomainGovernance"
+                    ));
+                    coveredAttributes.addAll(attrs);
+                }
+            }
+        }
+        return List.copyOf(merged);
+    }
+
+    private void synthesizeAnnotatedPrimaryScopePolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            List<MetadataDtoGovernanceIntrospector.DeclaredMaskSpec> allMasks
+    ) {
+        DecisionPointDescriptor dp = spec.decisionPoint();
+        if (dp == null) {
+            return;
+        }
+        List<MaskContributionSpec> searchMasks = allMasks.stream()
+                .filter(m -> m.surfaces().isEmpty() && m.modes().contains(EvaluationMode.SEARCH))
+                .map(MetadataDtoGovernanceIntrospector.DeclaredMaskSpec::contribution)
+                .toList();
+        List<MaskContributionSpec> targetMasks = allMasks.stream()
+                .filter(m -> m.surfaces().isEmpty() && m.modes().contains(EvaluationMode.TARGET))
+                .map(MetadataDtoGovernanceIntrospector.DeclaredMaskSpec::contribution)
+                .toList();
+
+        String sanitizedResource = spec.resourceKey().replace('.', '-');
+        AuthzResourceGovernanceSpec.TenantScopeSpec tenantSpec = spec.tenantScopeSpec();
+        String policyId = (tenantSpec != null && !tenantSpec.policyId().isBlank())
+                ? tenantSpec.policyId()
+                : "pol-" + serviceKey + "-" + sanitizedResource + "-scope";
+        String baseRuleId = (tenantSpec != null && !tenantSpec.ruleId().isBlank())
+                ? tenantSpec.ruleId()
+                : "rule-" + sanitizedResource + "-scope";
+        String unitKey = "unit:" + policyId + ":v1";
+
+        List<ObligationDirective> auditObligations = List.of(new ObligationDirective(
+                "DURABLE_AUDIT_EVIDENCE",
+                "ON_PERMIT",
+                "BEFORE_COMMIT_OUTBOX",
+                Map.of(
+                        "auditCategory", "GOVERNED_RESOURCE_ACCESS",
+                        "resourceKey", spec.resourceKey()
+                )
+        ));
+
+        List<AuthorizationPolicyRule> rules = new ArrayList<>();
+        Map<String, Object> principalPresent = Map.of("is_not_null", Map.of("var", "subject.principalId"));
+
+        if (spec.dualScopeDelegationSpec() != null) {
+            var dual = spec.dualScopeDelegationSpec();
+            String originResourceFact = dual.originFactPath();
+            String originSubjectFact = spec.originSubjectFactKey() != null
+                    ? spec.originSubjectFactKey()
+                    : "subject.organizationUnitIds";
+            Map<String, Object> originPred = Map.of(
+                    "in",
+                    List.of(Map.of("var", originResourceFact), Map.of("var", originSubjectFact))
+            );
+            Map<String, Object> originAdmission = Map.of(
+                    "and",
+                    List.of(principalPresent, Map.of("is_not_null", Map.of("var", originSubjectFact)))
+            );
+            rules.add(new AuthorizationPolicyRule(
+                    baseRuleId + "-origin-search",
+                    "Origin custody SEARCH scope for " + spec.resourceKey(),
+                    Set.of(EvaluationMode.SEARCH),
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            originAdmission
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            new DataScopeContributionSpec(
+                                    ContributionAuthority.GRANT,
+                                    new AuthorizationSourceCondition(
+                                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                            ConditionProfileKind.AUTHORIZATION_SEARCH_SOURCE_V1,
+                                            originPred
+                                    )
+                            ),
+                            List.of(),
+                            List.of(),
+                            searchMasks,
+                            "ALLOW_ORIGIN_CUSTODY_SEARCH"
+                    ),
+                    auditObligations
+            ));
+            rules.add(new AuthorizationPolicyRule(
+                    baseRuleId + "-origin-target",
+                    "Origin custody TARGET access for " + spec.resourceKey(),
+                    Set.of(EvaluationMode.TARGET),
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            combineAndConditions(List.of(originAdmission, originPred))
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            null,
+                            List.of(),
+                            List.of(),
+                            targetMasks,
+                            "ALLOW_ORIGIN_CUSTODY_TARGET"
+                    ),
+                    auditObligations
+            ));
+
+            String destResourceFact = dual.destinationFactPath();
+            if (destResourceFact != null && !destResourceFact.isBlank()) {
+                String destSubjectFact = spec.destinationSubjectFactKey() != null
+                        ? spec.destinationSubjectFactKey()
+                        : "subject.organizationUnitIds";
+                Map<String, Object> destPred = Map.of(
+                        "in",
+                        List.of(Map.of("var", destResourceFact), Map.of("var", destSubjectFact))
+                );
+                Map<String, Object> destAdmission = Map.of(
+                        "and",
+                        List.of(principalPresent, Map.of("is_not_null", Map.of("var", destSubjectFact)))
+                );
+                List<FieldWriteContributionSpec> destFieldWrites =
+                        ((org.praxisplatform.authz.contracts.policy.DualScopeDelegationSpec.ORIGIN_DESTINATION_SPLIT.equals(dual.mode())
+                                || "CEDENTE_CESSIONARIO_SPLIT".equals(dual.mode()))
+                                && dual.destinationAllowedWriteAttributes() != null
+                                && !dual.destinationAllowedWriteAttributes().isEmpty())
+                                ? List.of(new FieldWriteContributionSpec(
+                                        PolicyFieldSelector.exact(Set.copyOf(dual.destinationAllowedWriteAttributes())),
+                                        RuleEffect.ALLOW
+                                ))
+                                : List.of();
+                rules.add(new AuthorizationPolicyRule(
+                        baseRuleId + "-dest-search",
+                        "Destination custody SEARCH scope for " + spec.resourceKey(),
+                        Set.of(EvaluationMode.SEARCH),
+                        new AuthorizationSourceCondition(
+                                AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                                destAdmission
+                        ),
+                        new AuthorizationRuleContributions(
+                                new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                                new DataScopeContributionSpec(
+                                        ContributionAuthority.GRANT,
+                                        new AuthorizationSourceCondition(
+                                                AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                                ConditionProfileKind.AUTHORIZATION_SEARCH_SOURCE_V1,
+                                                destPred
+                                        )
+                                ),
+                                List.of(),
+                                destFieldWrites,
+                                searchMasks,
+                                "ALLOW_DESTINATION_CUSTODY_SEARCH"
+                        ),
+                        auditObligations
+                ));
+                rules.add(new AuthorizationPolicyRule(
+                        baseRuleId + "-dest-target",
+                        "Destination custody TARGET access for " + spec.resourceKey(),
+                        Set.of(EvaluationMode.TARGET),
+                        new AuthorizationSourceCondition(
+                                AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                                combineAndConditions(List.of(destAdmission, destPred))
+                        ),
+                        new AuthorizationRuleContributions(
+                                new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                                null,
+                                List.of(),
+                                destFieldWrites,
+                                targetMasks,
+                                "ALLOW_DESTINATION_CUSTODY_TARGET"
+                        ),
+                        auditObligations
+                ));
+            }
+        } else if (spec.tenantScopeMode()
+                == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            rules.add(new AuthorizationPolicyRule(
+                    baseRuleId + "-shared-search",
+                    "Authenticated shared SEARCH access for " + spec.resourceKey(),
+                    Set.of(EvaluationMode.SEARCH),
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            principalPresent
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            null,
+                            List.of(),
+                            List.of(),
+                            searchMasks,
+                            "ALLOW_AUTHENTICATED_SHARED_SEARCH"
+                    ),
+                    auditObligations
+            ));
+            rules.add(new AuthorizationPolicyRule(
+                    baseRuleId + "-shared-target",
+                    "Authenticated shared TARGET access for " + spec.resourceKey(),
+                    Set.of(EvaluationMode.TARGET),
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            principalPresent
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            null,
+                            List.of(),
+                            List.of(),
+                            targetMasks,
+                            "ALLOW_AUTHENTICATED_SHARED_TARGET"
+                    ),
+                    auditObligations
+            ));
+        } else {
+            Map<String, Object> scopePred = buildResourceScopePredicate(spec);
+            Map<String, Object> searchAdmission = buildSubjectScopeAdmissionCondition(spec);
+            Map<String, Object> targetCond = combineAndConditions(List.of(searchAdmission, scopePred));
+            rules.add(new AuthorizationPolicyRule(
+                    baseRuleId + "-search",
+                    "Scoped SEARCH access and data filter for " + spec.resourceKey(),
+                    Set.of(EvaluationMode.SEARCH),
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            searchAdmission
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            new DataScopeContributionSpec(
+                                    ContributionAuthority.GRANT,
+                                    new AuthorizationSourceCondition(
+                                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                            ConditionProfileKind.AUTHORIZATION_SEARCH_SOURCE_V1,
+                                            scopePred
+                                    )
+                            ),
+                            List.of(),
+                            List.of(),
+                            searchMasks,
+                            "ALLOW_SCOPED_RESOURCE_SEARCH"
+                    ),
+                    auditObligations
+            ));
+            rules.add(new AuthorizationPolicyRule(
+                    baseRuleId + "-target",
+                    "Scoped TARGET access and masking for " + spec.resourceKey(),
+                    Set.of(EvaluationMode.TARGET),
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            targetCond
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            null,
+                            List.of(),
+                            List.of(),
+                            targetMasks,
+                            "ALLOW_SCOPED_RESOURCE_TARGET"
+                    ),
+                    auditObligations
+            ));
+        }
+
+        Set<EvaluationMode> dpModes = dp.evaluationModes().isEmpty()
+                ? Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET)
+                : dp.evaluationModes();
+        AuthorizationPolicyDefinition policy = new AuthorizationPolicyDefinition(
+                AuthorizationPolicyDefinition.SCHEMA_VERSION_V1,
+                policyId,
+                "1.0.0",
+                "Zero-Config Scope Policy for " + spec.resourceKey(),
+                "Annotation-derived scope, field-masking, and durable audit authorization policy",
+                Set.of("TENANT_SCOPE"),
+                dp.legalPurpose() != null ? dp.legalPurpose() : "STATUTORY_LEGAL_OBLIGATION",
+                dp.legalBasisRef() != null ? dp.legalBasisRef() : "LGPD:ART_7_III",
+                OpaProviderIoSchemas.COMBINING_PROFILE_V1,
+                List.of(PolicyTargetSpec.exact(
+                        "tgt-" + sanitizedResource + "-scope",
+                        dp.identity().pointKey(),
+                        dp.descriptorDigest(),
+                        dpModes
+                )),
+                spec.dualScopeDelegationSpec(),
+                List.of(),
+                List.copyOf(rules),
+                List.of(new PolicyMaterializationTargetSpec(
+                        "policy_engine",
+                        "opa-policy",
+                        unitKey,
+                        OpaProviderIoSchemas.COMPILER_PROFILE_V1
+                ))
+        );
+        addPolicy(policy);
+    }
+
+    private void synthesizeAnnotatedActionPolicies(AuthzResourceGovernanceSpec<?> spec) {
+        if (spec.actionDecisionPoints().isEmpty()) {
+            return;
+        }
+        String sanitizedResource = spec.resourceKey().replace('.', '-');
+        for (Map.Entry<String, DecisionPointDescriptor> entry : spec.actionDecisionPoints().entrySet()) {
+            String actionKey = entry.getKey();
+            DecisionPointDescriptor actionDp = entry.getValue();
+            AuthzResourceGovernanceSpec.ActionRuleSpec ruleSpec = spec.actionRuleSpecs().get(actionKey);
+            String sanitizedAction = actionKey.replace('.', '-');
+            boolean isBulk = actionDp.evaluationModes().contains(EvaluationMode.SEARCH)
+                    && actionDp.supportedCapabilities().contains(EnforcementCapability.DATA_SCOPE)
+                    && actionDp.queryProjectionRef() != null;
+
+            String policyId = (ruleSpec != null && !ruleSpec.policyId().isBlank())
+                    ? ruleSpec.policyId()
+                    : "pol-" + serviceKey + "-" + sanitizedResource
+                            + (isBulk ? "-bulk-act-" : "-act-") + sanitizedAction;
+            String ruleId = (ruleSpec != null && !ruleSpec.ruleId().isBlank())
+                    ? ruleSpec.ruleId()
+                    : "rule-" + sanitizedResource + "-act-" + sanitizedAction;
+            String unitKey = "unit:" + policyId + ":v1";
+
+            Set<String> allowedWrites = new java.util.LinkedHashSet<>();
+            if (ruleSpec != null && !ruleSpec.allowedWriteAttributes().isEmpty()) {
+                allowedWrites.addAll(ruleSpec.allowedWriteAttributes());
+            } else {
+                Set<String> inferred = spec.operationModifiedAttributes().get(actionKey);
+                if (inferred != null) {
+                    allowedWrites.addAll(inferred);
+                }
+            }
+            List<FieldWriteContributionSpec> fieldWrites = allowedWrites.isEmpty()
+                    ? List.of()
+                    : List.of(new FieldWriteContributionSpec(
+                            PolicyFieldSelector.exact(Set.copyOf(allowedWrites)),
+                            RuleEffect.ALLOW
+                    ));
+
+            String reasonCode = (ruleSpec != null && !ruleSpec.reasonCode().isBlank())
+                    ? ruleSpec.reasonCode()
+                    : ("ALLOW_" + (isBulk ? "BULK_ACTION_" : "ACTION_")
+                            + actionKey.toUpperCase().replace('-', '_').replace('.', '_'));
+            boolean auditRequired = ruleSpec == null || ruleSpec.auditRequired();
+            String auditCategory = (ruleSpec != null && !ruleSpec.auditCategory().isBlank())
+                    ? ruleSpec.auditCategory()
+                    : (isBulk ? "GOVERNED_BULK_WORKFLOW_ACTION" : "GOVERNED_WORKFLOW_ACTION");
+            List<ObligationDirective> obligations = auditRequired
+                    ? List.of(new ObligationDirective(
+                            "DURABLE_AUDIT_EVIDENCE",
+                            "ON_PERMIT",
+                            "BEFORE_COMMIT_OUTBOX",
+                            Map.of("auditCategory", auditCategory, "actionKey", actionKey)
+                    ))
+                    : List.of();
+
+            Set<EvaluationMode> evalModes = actionDp.evaluationModes().isEmpty()
+                    ? Set.of(EvaluationMode.TARGET)
+                    : actionDp.evaluationModes();
+
+            List<AuthorizationPolicyRule> rules = new ArrayList<>();
+            if (evalModes.contains(EvaluationMode.SEARCH)) {
+                Map<String, Object> searchCond = buildAnnotatedRuleCondition(spec, ruleSpec, false);
+                DataScopeContributionSpec searchScope = spec.tenantScopeMode()
+                        == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.AUTHENTICATED_SHARED
+                        ? null
+                        : new DataScopeContributionSpec(
+                                ContributionAuthority.GRANT,
+                                new AuthorizationSourceCondition(
+                                        AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                        ConditionProfileKind.AUTHORIZATION_SEARCH_SOURCE_V1,
+                                        buildResourceScopePredicate(spec)
+                                )
+                        );
+                rules.add(new AuthorizationPolicyRule(
+                        ruleId + "-search",
+                        "Grants SEARCH admission and scope for workflow action '" + actionKey
+                                + "' on " + spec.resourceKey(),
+                        Set.of(EvaluationMode.SEARCH),
+                        new AuthorizationSourceCondition(
+                                AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                                searchCond
+                        ),
+                        new AuthorizationRuleContributions(
+                                new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                                searchScope,
+                                List.of(),
+                                fieldWrites,
+                                List.of(),
+                                reasonCode
+                        ),
+                        obligations
+                ));
+            }
+            if (evalModes.contains(EvaluationMode.TARGET)) {
+                Map<String, Object> targetCond = buildAnnotatedRuleCondition(spec, ruleSpec, true);
+                rules.add(new AuthorizationPolicyRule(
+                        isBulk ? ruleId + "-target" : ruleId,
+                        "Grants TARGET execution for workflow action '" + actionKey
+                                + "' on " + spec.resourceKey(),
+                        Set.of(EvaluationMode.TARGET),
+                        new AuthorizationSourceCondition(
+                                AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                                targetCond
+                        ),
+                        new AuthorizationRuleContributions(
+                                new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                                null,
+                                List.of(),
+                                fieldWrites,
+                                List.of(),
+                                reasonCode
+                        ),
+                        obligations
+                ));
+            }
+
+            String legalPurpose = (ruleSpec != null && !ruleSpec.legalPurpose().isBlank())
+                    ? ruleSpec.legalPurpose()
+                    : (actionDp.legalPurpose() != null ? actionDp.legalPurpose() : "STATUTORY_LEGAL_OBLIGATION");
+            String legalBasisRef = (ruleSpec != null && !ruleSpec.legalBasisRef().isBlank())
+                    ? ruleSpec.legalBasisRef()
+                    : (actionDp.legalBasisRef() != null ? actionDp.legalBasisRef() : "LGPD:ART_7_III");
+            String description = (ruleSpec != null && !ruleSpec.description().isBlank())
+                    ? ruleSpec.description()
+                    : "Declarative workflow action authorization policy for '" + actionKey + "'";
+
+            addPolicy(new AuthorizationPolicyDefinition(
+                    AuthorizationPolicyDefinition.SCHEMA_VERSION_V1,
+                    policyId,
+                    "1.0.0",
+                    "Action Policy (" + actionKey + ") for " + spec.resourceKey(),
+                    description,
+                    Set.of(isBulk ? "BULK_WORKFLOW_ACTION" : "WORKFLOW_ACTION"),
+                    legalPurpose,
+                    legalBasisRef,
+                    OpaProviderIoSchemas.COMBINING_PROFILE_V1,
+                    List.of(PolicyTargetSpec.exact(
+                            "tgt-" + sanitizedResource + "-act-" + sanitizedAction,
+                            actionDp.identity().pointKey(),
+                            actionDp.descriptorDigest(),
+                            evalModes
+                    )),
+                    spec.dualScopeDelegationSpec(),
+                    List.of(),
+                    List.copyOf(rules),
+                    List.of(new PolicyMaterializationTargetSpec(
+                            "policy_engine",
+                            "opa-policy",
+                            unitKey,
+                            OpaProviderIoSchemas.COMPILER_PROFILE_V1
+                    ))
+            ));
+        }
+    }
+
+    private void synthesizeAnnotatedSurfacePolicies(
+            AuthzResourceGovernanceSpec<?> spec,
+            List<MetadataDtoGovernanceIntrospector.DeclaredMaskSpec> allMasks
+    ) {
+        if (spec.surfaceDecisionPoints().isEmpty()) {
+            return;
+        }
+        String sanitizedResource = spec.resourceKey().replace('.', '-');
+        for (Map.Entry<String, DecisionPointDescriptor> entry : spec.surfaceDecisionPoints().entrySet()) {
+            String surfaceKey = entry.getKey();
+            DecisionPointDescriptor surfaceDp = entry.getValue();
+            AuthzResourceGovernanceSpec.ActionRuleSpec ruleSpec = spec.surfaceRuleSpecs().get(surfaceKey);
+            String sanitizedSurface = surfaceKey.replace('.', '-');
+
+            String policyId = (ruleSpec != null && !ruleSpec.policyId().isBlank())
+                    ? ruleSpec.policyId()
+                    : "pol-" + serviceKey + "-" + sanitizedResource + "-srf-" + sanitizedSurface;
+            String ruleId = (ruleSpec != null && !ruleSpec.ruleId().isBlank())
+                    ? ruleSpec.ruleId()
+                    : "rule-" + sanitizedResource + "-srf-" + sanitizedSurface;
+            String unitKey = "unit:" + policyId + ":v1";
+
+            List<MaskContributionSpec> surfaceMasks = allMasks.stream()
+                    .filter(m -> m.modes().contains(EvaluationMode.TARGET)
+                            && (m.surfaces().isEmpty() || m.surfaces().contains(surfaceKey)))
+                    .map(MetadataDtoGovernanceIntrospector.DeclaredMaskSpec::contribution)
+                    .toList();
+
+            Set<EvaluationMode> evalModes = surfaceDp.evaluationModes().isEmpty()
+                    ? Set.of(EvaluationMode.TARGET)
+                    : surfaceDp.evaluationModes();
+            Map<String, Object> targetCond = buildAnnotatedRuleCondition(spec, ruleSpec, true);
+            String reasonCode = (ruleSpec != null && !ruleSpec.reasonCode().isBlank())
+                    ? ruleSpec.reasonCode()
+                    : ("ALLOW_SURFACE_" + surfaceKey.toUpperCase().replace('-', '_').replace('.', '_'));
+            boolean auditRequired = ruleSpec == null || ruleSpec.auditRequired();
+            String auditCategory = (ruleSpec != null && !ruleSpec.auditCategory().isBlank())
+                    ? ruleSpec.auditCategory()
+                    : "GOVERNED_SURFACE_ACCESS";
+            List<ObligationDirective> obligations = auditRequired
+                    ? List.of(new ObligationDirective(
+                            "DURABLE_AUDIT_EVIDENCE",
+                            "ON_PERMIT",
+                            "BEFORE_COMMIT_OUTBOX",
+                            Map.of("auditCategory", auditCategory, "surfaceKey", surfaceKey)
+                    ))
+                    : List.of();
+
+            AuthorizationPolicyRule rule = new AuthorizationPolicyRule(
+                    ruleId,
+                    "Grants surface '" + surfaceKey + "' access and masking for " + spec.resourceKey(),
+                    evalModes,
+                    new AuthorizationSourceCondition(
+                            AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                            ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                            targetCond
+                    ),
+                    new AuthorizationRuleContributions(
+                            new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                            null,
+                            List.of(),
+                            List.of(),
+                            surfaceMasks,
+                            reasonCode
+                    ),
+                    obligations
+            );
+
+            String legalPurpose = (ruleSpec != null && !ruleSpec.legalPurpose().isBlank())
+                    ? ruleSpec.legalPurpose()
+                    : (surfaceDp.legalPurpose() != null ? surfaceDp.legalPurpose() : "STATUTORY_LEGAL_OBLIGATION");
+            String legalBasisRef = (ruleSpec != null && !ruleSpec.legalBasisRef().isBlank())
+                    ? ruleSpec.legalBasisRef()
+                    : (surfaceDp.legalBasisRef() != null ? surfaceDp.legalBasisRef() : "LGPD:ART_7_III");
+            String description = (ruleSpec != null && !ruleSpec.description().isBlank())
+                    ? ruleSpec.description()
+                    : "Declarative UI surface authorization and masking policy for '" + surfaceKey + "'";
+
+            addPolicy(new AuthorizationPolicyDefinition(
+                    AuthorizationPolicyDefinition.SCHEMA_VERSION_V1,
+                    policyId,
+                    "1.0.0",
+                    "Surface Policy (" + surfaceKey + ") for " + spec.resourceKey(),
+                    description,
+                    Set.of("UI_SURFACE"),
+                    legalPurpose,
+                    legalBasisRef,
+                    OpaProviderIoSchemas.COMBINING_PROFILE_V1,
+                    List.of(PolicyTargetSpec.exact(
+                            "tgt-" + sanitizedResource + "-srf-" + sanitizedSurface,
+                            surfaceDp.identity().pointKey(),
+                            surfaceDp.descriptorDigest(),
+                            evalModes
+                    )),
+                    spec.dualScopeDelegationSpec(),
+                    List.of(),
+                    List.of(rule),
+                    List.of(new PolicyMaterializationTargetSpec(
+                            "policy_engine",
+                            "opa-policy",
+                            unitKey,
+                            OpaProviderIoSchemas.COMPILER_PROFILE_V1
+                    ))
+            ));
+        }
+    }
+
+    private static Map<String, Object> buildSubjectScopeAdmissionCondition(AuthzResourceGovernanceSpec<?> spec) {
+        Map<String, Object> principalPresent = Map.of("is_not_null", Map.of("var", "subject.principalId"));
+        if (spec.dualScopeDelegationSpec() != null
+                || spec.tenantScopeMode()
+                        == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            return principalPresent;
+        }
+        String subjectFactPath = resolveEffectiveSubjectScopeFactPath(spec);
+        return Map.of(
+                "and",
+                List.of(principalPresent, Map.of("is_not_null", Map.of("var", subjectFactPath)))
+        );
+    }
+
+    private static Map<String, Object> buildResourceScopePredicate(AuthzResourceGovernanceSpec<?> spec) {
+        if (spec.dualScopeDelegationSpec() != null) {
+            var dual = spec.dualScopeDelegationSpec();
+            String originResourceFact = dual.originFactPath();
+            String originSubjectFact = spec.originSubjectFactKey() != null
+                    ? spec.originSubjectFactKey()
+                    : "subject.organizationUnitIds";
+            Map<String, Object> originPred = Map.of(
+                    "in",
+                    List.of(Map.of("var", originResourceFact), Map.of("var", originSubjectFact))
+            );
+            String destResourceFact = dual.destinationFactPath();
+            if (destResourceFact != null && !destResourceFact.isBlank()) {
+                String destSubjectFact = spec.destinationSubjectFactKey() != null
+                        ? spec.destinationSubjectFactKey()
+                        : "subject.organizationUnitIds";
+                Map<String, Object> destPred = Map.of(
+                        "in",
+                        List.of(Map.of("var", destResourceFact), Map.of("var", destSubjectFact))
+                );
+                return Map.of("or", List.of(originPred, destPred));
+            }
+            return originPred;
+        }
+        AuthzResourceGovernanceSpec.TenantScopeSpec tenantSpec = spec.tenantScopeSpec();
+        String resourceFactPath = (tenantSpec != null && !tenantSpec.resourceFactPath().isBlank())
+                ? tenantSpec.resourceFactPath()
+                : "resource." + spec.tenantFieldName();
+        String subjectFactPath = resolveEffectiveSubjectScopeFactPath(spec);
+        boolean collectionSubjectFact = isCollectionScopeFact(subjectFactPath, spec.tenantScopeMode());
+        Map<String, Object> comparison = collectionSubjectFact
+                ? Map.of("in", List.of(Map.of("var", resourceFactPath), Map.of("var", subjectFactPath)))
+                : Map.of("==", List.of(Map.of("var", resourceFactPath), Map.of("var", subjectFactPath)));
+        if (spec.allowGlobalNullScope()) {
+            return Map.of("or", List.of(comparison, Map.of("is_null", Map.of("var", resourceFactPath))));
+        }
+        return comparison;
+    }
+
+    private static String resolveEffectiveSubjectScopeFactPath(AuthzResourceGovernanceSpec<?> spec) {
+        if (spec.tenantScopeSpec() != null && !spec.tenantScopeSpec().subjectFactPath().isBlank()) {
+            return spec.tenantScopeSpec().subjectFactPath();
+        }
+        if (spec.hardScopeSubjectFactKey() != null && !spec.hardScopeSubjectFactKey().isBlank()) {
+            return spec.hardScopeSubjectFactKey();
+        }
+        return spec.tenantScopeMode()
+                == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.TENANT_ONLY
+                ? "subject.tenantId"
+                : "subject.organizationUnitIds";
+    }
+
+    private static boolean isCollectionScopeFact(
+            String subjectFactPath,
+            org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode mode
+    ) {
+        if (AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS.equals(subjectFactPath)
+                || AuthzCallerContext.FACT_ORGANIZATION_UNIT_IDS.equals(subjectFactPath)
+                || subjectFactPath.endsWith("Ids")
+                || subjectFactPath.endsWith("ids")) {
+            return true;
+        }
+        return mode == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.ORGANIZATIONAL_UNIT
+                && !"subject.tenantId".equals(subjectFactPath);
+    }
+
+    private static Map<String, Object> buildAnnotatedRuleCondition(
+            AuthzResourceGovernanceSpec<?> spec,
+            AuthzResourceGovernanceSpec.ActionRuleSpec ruleSpec,
+            boolean includeResourceScope
+    ) {
+        List<Map<String, Object>> baseTerms = new ArrayList<>();
+        if (ruleSpec == null || ruleSpec.requireAuthenticatedPrincipal()) {
+            baseTerms.add(Map.of("is_not_null", Map.of("var", "subject.principalId")));
+        }
+        Map<String, Object> scopeCondition = includeResourceScope && spec.tenantScopeMode()
+                != org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.AUTHENTICATED_SHARED
+                ? combineAndConditions(List.of(buildSubjectScopeAdmissionCondition(spec), buildResourceScopePredicate(spec)))
+                : buildSubjectScopeAdmissionCondition(spec);
+        baseTerms.add(scopeCondition);
+
+        if (ruleSpec != null && !ruleSpec.conditionFactPath().isBlank()) {
+            if (!ruleSpec.conditionAllowedValues().isEmpty()) {
+                baseTerms.add(Map.of(
+                        "in",
+                        List.of(Map.of("var", ruleSpec.conditionFactPath()), ruleSpec.conditionAllowedValues())
+                ));
+            } else {
+                baseTerms.add(Map.of("is_not_null", Map.of("var", ruleSpec.conditionFactPath())));
+            }
+        }
+        if (ruleSpec != null && !ruleSpec.conditionJsonLogic().isBlank()) {
+            baseTerms.add(parseJsonLogicObject(ruleSpec.conditionJsonLogic()));
+        }
+        if (ruleSpec != null && !ruleSpec.requiredRoles().isEmpty()) {
+            List<Map<String, Object>> roleBranches = new ArrayList<>(ruleSpec.requiredRoles().size());
+            for (String role : ruleSpec.requiredRoles()) {
+                roleBranches.add(Map.of("in", List.of(role, Map.of("var", "subject.roles"))));
+            }
+            if (roleBranches.size() == 1) {
+                baseTerms.add(roleBranches.get(0));
+            } else {
+                baseTerms.add(Map.of("or", roleBranches));
+            }
+        }
+        return combineAndConditions(baseTerms);
+    }
+
+    /**
+     * Combines multiple JSON-Logic conditions under logical AND while distributing any top-level
+     * {@code "or"} to the outermost node so {@code RegoV1PolicyCompiler} emits complete Rego rules.
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> combineAndConditions(List<Map<String, Object>> terms) {
+        List<List<Map<String, Object>>> dnfBranches = new ArrayList<>();
+        dnfBranches.add(new ArrayList<>());
+        for (Map<String, Object> term : terms) {
+            if (term == null || term.isEmpty()) {
+                continue;
+            }
+            List<Map<String, Object>> termDisjuncts = extractTopLevelDisjuncts(term);
+            List<List<Map<String, Object>>> nextBranches = new ArrayList<>();
+            for (List<Map<String, Object>> existing : dnfBranches) {
+                for (Map<String, Object> disjunct : termDisjuncts) {
+                    List<Map<String, Object>> combined = new ArrayList<>(existing);
+                    flattenAndTerms(disjunct, combined);
+                    nextBranches.add(combined);
+                }
+            }
+            dnfBranches = nextBranches;
+        }
+        if (dnfBranches.size() == 1) {
+            return andOfTerms(dnfBranches.get(0));
+        }
+        List<Map<String, Object>> orBranches = new ArrayList<>(dnfBranches.size());
+        for (List<Map<String, Object>> branchTerms : dnfBranches) {
+            orBranches.add(andOfTerms(branchTerms));
+        }
+        return Map.of("or", List.copyOf(orBranches));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> extractTopLevelDisjuncts(Map<String, Object> expr) {
+        if (expr.size() == 1 && expr.containsKey("or") && expr.get("or") instanceof List<?> rawList) {
+            List<Map<String, Object>> disjuncts = new ArrayList<>();
+            for (Object item : rawList) {
+                if (item instanceof Map<?, ?> map) {
+                    disjuncts.addAll(extractTopLevelDisjuncts((Map<String, Object>) map));
+                }
+            }
+            if (!disjuncts.isEmpty()) {
+                return disjuncts;
+            }
+        }
+        if (expr.size() == 1 && expr.containsKey("and") && expr.get("and") instanceof List<?> rawAnd) {
+            List<Map<String, Object>> nestedTerms = new ArrayList<>();
+            boolean hasNestedOr = false;
+            for (Object item : rawAnd) {
+                if (item instanceof Map<?, ?> map) {
+                    Map<String, Object> sub = (Map<String, Object>) map;
+                    if (sub.containsKey("or")) {
+                        hasNestedOr = true;
+                    }
+                    nestedTerms.add(sub);
+                }
+            }
+            if (hasNestedOr) {
+                Map<String, Object> distributed = combineAndConditions(nestedTerms);
+                if (distributed.containsKey("or") && distributed.get("or") instanceof List<?> distList) {
+                    List<Map<String, Object>> out = new ArrayList<>();
+                    for (Object item : distList) {
+                        if (item instanceof Map<?, ?> map) {
+                            out.add((Map<String, Object>) map);
+                        }
+                    }
+                    if (!out.isEmpty()) {
+                        return out;
+                    }
+                }
+            }
+        }
+        return List.of(expr);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void flattenAndTerms(Map<String, Object> term, List<Map<String, Object>> sink) {
+        if (term.size() == 1 && term.containsKey("and") && term.get("and") instanceof List<?> rawList) {
+            for (Object item : rawList) {
+                if (item instanceof Map<?, ?> map) {
+                    flattenAndTerms((Map<String, Object>) map, sink);
+                }
+            }
+            return;
+        }
+        if (!sink.contains(term)) {
+            sink.add(term);
+        }
+    }
+
+    private static Map<String, Object> andOfTerms(List<Map<String, Object>> terms) {
+        if (terms.isEmpty()) {
+            return Map.of("is_not_null", Map.of("var", "subject.principalId"));
+        }
+        if (terms.size() == 1) {
+            return terms.get(0);
+        }
+        return Map.of("and", List.copyOf(terms));
+    }
+
+    private static Map<String, Object> parseJsonLogicObject(String json) {
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().readValue(
+                    json,
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}
+            );
+        } catch (Exception ex) {
+            throw new IllegalArgumentException(
+                    "Invalid conditionJsonLogic in @AuthzActionRule: " + ex.getMessage(),
+                    ex
+            );
+        }
+    }
+
+    /**
      * Synthesizes and registers a standard organizational-scope + field-masking + durable-audit
      * {@link AuthorizationPolicyDefinition} targeting the given {@code spec}'s primary decision point.
      *

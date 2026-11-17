@@ -188,6 +188,113 @@ public class PraxisAuthzHostBridgeAutoConfiguration {
         }
 
         @Bean
+        @ConditionalOnMissingBean(org.praxisplatform.authz.host.metadata.HardScopeResolver.class)
+        public org.praxisplatform.authz.host.metadata.HardScopeResolver hardScopeResolver() {
+            return new org.praxisplatform.authz.host.metadata.MultiOrganizationHardScopeResolver();
+        }
+
+        @Bean
+        @ConditionalOnClass(org.praxisplatform.uischema.capability.ResourceOperationAvailabilityRule.class)
+        @ConditionalOnMissingBean(org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityRule.class)
+        @ConditionalOnBean(AuthzResourceOperationAvailabilityProvider.class)
+        public org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityRule authzResourceOperationAvailabilityRule(
+                AuthzResourceOperationAvailabilityProvider availabilityProvider
+        ) {
+            return new org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityRule(availabilityProvider);
+        }
+
+        @Bean
+        @org.springframework.context.annotation.Primary
+        @ConditionalOnClass(org.praxisplatform.uischema.capability.CompositeResourceOperationAvailabilityEvaluator.class)
+        @ConditionalOnBean(org.praxisplatform.uischema.capability.ResourceOperationAvailabilityRule.class)
+        @ConditionalOnMissingBean(
+                value = org.praxisplatform.uischema.capability.ResourceOperationAvailabilityProvider.class,
+                ignored = AuthzResourceOperationAvailabilityProvider.class
+        )
+        public org.praxisplatform.uischema.capability.CompositeResourceOperationAvailabilityEvaluator compositeResourceOperationAvailabilityProvider(
+                ObjectProvider<org.praxisplatform.uischema.capability.ResourceOperationAvailabilityRule> rules
+        ) {
+            return new org.praxisplatform.uischema.capability.CompositeResourceOperationAvailabilityEvaluator(
+                    rules.orderedStream().toList()
+            );
+        }
+
+        @Bean
+        @ConditionalOnClass(org.praxisplatform.uischema.governance.ResourceGovernanceInterceptor.class)
+        @ConditionalOnMissingBean(org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceInterceptor.class)
+        @ConditionalOnBean({
+                AuthzGovernedResourceServiceSupport.class,
+                org.praxisplatform.authz.host.metadata.AuthzCallerContextProvider.class
+        })
+        public org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceInterceptor authzResourceGovernanceInterceptor(
+                AuthzGovernedResourceServiceSupport serviceSupport,
+                org.praxisplatform.authz.host.metadata.AuthzCallerContextProvider callerContextProvider,
+                ObjectProvider<org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry> decisionPointRegistry,
+                ObjectProvider<org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec<?>> registeredSpecs,
+                org.springframework.context.ApplicationContext applicationContext,
+                PraxisAuthzProperties properties
+        ) {
+            return new org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceInterceptor(
+                    serviceSupport,
+                    callerContextProvider,
+                    decisionPointRegistry.getIfAvailable(),
+                    registeredSpecs.stream().toList(),
+                    applicationContext,
+                    properties.getInterceptor().isFailClosedOnUnconfiguredServices()
+            );
+        }
+
+        @Bean
+        @ConditionalOnClass({
+                org.praxisplatform.uischema.governance.ResourceGovernanceInterceptor.class,
+                org.praxisplatform.uischema.service.base.BaseResourceQueryService.class
+        })
+        public org.springframework.beans.factory.SmartInitializingSingleton authzInterceptorServicesInitializer(
+                ObjectProvider<org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceInterceptor> interceptorProvider,
+                ObjectProvider<org.praxisplatform.uischema.service.base.BaseResourceQueryService<?, ?, ?>> queryServicesProvider,
+                ObjectProvider<AuthzResourceOperationAvailabilityProvider> availabilityProvider,
+                ObjectProvider<org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry> registryProvider,
+                ObjectProvider<org.praxisplatform.authz.catalog.SemanticDecisionPointCatalogService> catalogServiceProvider,
+                ObjectProvider<org.praxisplatform.authz.host.metadata.AuthzHostReadinessReviewer> readinessReviewerProvider,
+                ObjectProvider<PraxisAuthzProperties> propertiesProvider
+        ) {
+            return () -> {
+                var interceptor = interceptorProvider.getIfAvailable();
+                if (interceptor == null) {
+                    return;
+                }
+                var avail = availabilityProvider.getIfAvailable();
+                var registry = registryProvider.getIfAvailable();
+                var catalog = catalogServiceProvider.getIfAvailable();
+                java.util.List<org.praxisplatform.uischema.service.base.BaseResourceQueryService<?, ?, ?>> governedPlainServices =
+                        new java.util.ArrayList<>();
+                java.util.Map<String, org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec<?>> resolvedSpecs =
+                        new java.util.LinkedHashMap<>();
+
+                for (var svc : queryServicesProvider.orderedStream().toList()) {
+                    var spec = interceptor.resolvedSpecFor(svc);
+                    if (spec != null) {
+                        governedPlainServices.add(svc);
+                        resolvedSpecs.put(spec.resourceKey(), spec);
+                        interceptor.registerAvailabilityBindingIfSupported(svc, avail);
+                        interceptor.synchronizeCatalogAndRegistryIfSupported(svc, registry, catalog);
+                    }
+                }
+                var props = propertiesProvider.getIfAvailable();
+                var reviewer = readinessReviewerProvider.getIfAvailable();
+                if (props != null && props.getReadinessGate().isVerifyOnStartup()
+                        && reviewer != null && !governedPlainServices.isEmpty()) {
+                    var report = reviewer.reviewInterceptorBoundServices(governedPlainServices, resolvedSpecs);
+                    if (props.getReadinessGate().isFailOnWarning()) {
+                        report.assertZeroIssues();
+                    } else {
+                        report.assertReady();
+                    }
+                }
+            };
+        }
+
+        @Bean
         @ConditionalOnMissingBean
         @ConditionalOnClass(name = "org.springframework.web.filter.OncePerRequestFilter")
         @ConditionalOnBean(AuthzCallerContextHttpResolver.class)

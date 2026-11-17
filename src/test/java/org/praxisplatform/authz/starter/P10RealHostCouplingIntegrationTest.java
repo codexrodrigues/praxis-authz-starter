@@ -82,9 +82,9 @@ import org.praxisplatform.authz.opa.governance.GovernedOpaReleaseCoordinator;
 import org.praxisplatform.authz.opa.governance.PolicyCandidateVerificationCorpusCase;
 import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
-import org.praxisplatform.authz.pilot.AfastamentoPilotRuntimeHost;
-import org.praxisplatform.authz.pilot.AfastamentoPilotRuntimeHost.AfastamentoRecord;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeavePilotRuntimeHost;
+import org.praxisplatform.authz.pilot.WorkforceLeavePilotRuntimeHost.WorkforceLeaveRecord;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
 import org.praxisplatform.authz.telemetry.SanitizedAuthorizationTelemetryPublisher;
 import org.praxisplatform.config.service.OperationalPolicyResolution;
@@ -125,7 +125,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 class P10RealHostCouplingIntegrationTest {
 
     @Entity(name = "AfastamentoHostJpaEntity")
-    @Table(name = "ergon_afastamentos_host_p10")
+    @Table(name = "workforce_leaves_host_p10")
     static class AfastamentoHostJpaEntity {
         @Id
         private Long id;
@@ -213,8 +213,8 @@ class P10RealHostCouplingIntegrationTest {
             return dependentes;
         }
 
-        AfastamentoRecord toRecord() {
-            return new AfastamentoRecord(
+        WorkforceLeaveRecord toRecord() {
+            return new WorkforceLeaveRecord(
                     id, tenantId, cedenteOrgaoId, cessionarioOrgaoId,
                     lotacaoSetorId, statusAfastamento, substitutoServidorId, cidCodigo
             );
@@ -222,7 +222,7 @@ class P10RealHostCouplingIntegrationTest {
     }
 
     @Entity(name = "DependenteHostJpaEntity")
-    @Table(name = "ergon_dependentes_host_p10")
+    @Table(name = "workforce_dependents_host_p10")
     static class DependenteHostJpaEntity {
         @Id
         private Long id;
@@ -246,7 +246,7 @@ class P10RealHostCouplingIntegrationTest {
 
     @Test
     void verifyP10RealJpaCriteriaScopePreHydrationMutationExportCommandAndConfigBridge() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:h2:mem:praxis_p10_host_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
@@ -316,7 +316,7 @@ class P10RealHostCouplingIntegrationTest {
                 List.of(new QueryAdapterFieldBinding(
                         blueprint.resourceKey(),
                         "resource.lotacaoSetorId",
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "lotacaoSetorId",
                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                         true
@@ -327,7 +327,7 @@ class P10RealHostCouplingIntegrationTest {
                 List.of(new QueryAdapterFieldBinding(
                         blueprint.resourceKey(),
                         "resource.lotacaoSetorId",
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "lotacaoSetorId",
                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                         true
@@ -338,7 +338,7 @@ class P10RealHostCouplingIntegrationTest {
                 ResourceFilterAccessScope.restricted((root, query, cb) -> cb.equal(root.get("tenantId"), "tenant-gov-br"));
 
         // 1. Real JPA Criteria SQL Execution via ResourceFilterAccessScope + Detached Masking (P05..P09, P11, P12)
-        List<AfastamentoRecord> maskedDtos = txTemplate.execute(status -> {
+        List<WorkforceLeaveRecord> maskedDtos = txTemplate.execute(status -> {
             ResourceFilterAccessScope<AfastamentoHostJpaEntity> composedScope =
                     serviceSupport.authorizeAndResolveAccessScope(
                             blueprint.decisionPoint(),
@@ -347,7 +347,7 @@ class P10RealHostCouplingIntegrationTest {
                             Map.of("subject.principalId", "usr-gestor-101", "subject.organizationUnitIds", List.of(100L, 200L)),
                             Map.of("subject.principalId", FactResolutionStatus.PRESENT, "subject.organizationUnitIds", FactResolutionStatus.PRESENT),
                             Map.of(),
-                            List.of(new FieldUseEffectDirective("ergon.afastamentos.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
+                            List.of(new FieldUseEffectDirective("workforce.leaves.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
                             jpaAdapter,
                             "e.tenantId = :hardTenantId",
                             Map.of("hardTenantId", "tenant-gov-br"),
@@ -369,11 +369,11 @@ class P10RealHostCouplingIntegrationTest {
             // Managed entity still holds raw CID in JPA persistence context before detached DTO masking
             assertEquals("M54.5", entities.getFirst().getCidCodigo());
 
-            List<AfastamentoRecord> rawRecords = entities.stream().map(AfastamentoHostJpaEntity::toRecord).toList();
-            List<AfastamentoRecord> masked = serviceSupport.maskQueryResponseDtos(
+            List<WorkforceLeaveRecord> rawRecords = entities.stream().map(AfastamentoHostJpaEntity::toRecord).toList();
+            List<WorkforceLeaveRecord> masked = serviceSupport.maskQueryResponseDtos(
                     rawRecords,
-                    AfastamentoRecord.class,
-                    AfastamentoPilotRuntimeHost.defaultFieldSchemas()
+                    WorkforceLeaveRecord.class,
+                    WorkforceLeavePilotRuntimeHost.defaultFieldSchemas()
             );
             // Verify managed entity was NOT mutated in JPA persistence context (P12)
             assertEquals("M54.5", entities.getFirst().getCidCodigo());
@@ -385,10 +385,10 @@ class P10RealHostCouplingIntegrationTest {
 
         // 1b. Verify Kleene 3VL null-safety (NOT(lotacaoSetorId == 999) excludes NULL row #103!) and 1:N correlated EXISTS subquery in JPA Criteria (P06, P07)
         QueryableFieldDescriptor lotacaoDesc = new QueryableFieldDescriptor(
-                "resource.lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id", FactValueType.INT64,
+                "resource.lotacaoSetorId", "workforce.leaves.lotacao_setor_id", FactValueType.INT64,
                 Set.of(SearchPredicateOperator.EQ, SearchPredicateOperator.IN), true);
         QueryableFieldDescriptor depCpfDesc = new QueryableFieldDescriptor(
-                "resource.dependenteCpf", "ergon.dependentes.cpf", FactValueType.STRING,
+                "resource.dependenteCpf", "workforce.dependents.cpf", FactValueType.STRING,
                 Set.of(SearchPredicateOperator.EQ), false);
         QueryableResourceProjection extProjection = new QueryableResourceProjection(
                 QueryableResourceProjection.SCHEMA_VERSION_V1,
@@ -402,11 +402,11 @@ class P10RealHostCouplingIntegrationTest {
                 List.of(
                         new QueryAdapterFieldBinding(
                                 blueprint.resourceKey(), "resource.lotacaoSetorId",
-                                "ergon.afastamentos.lotacao_setor_id", "lotacaoSetorId",
+                                "workforce.leaves.lotacao_setor_id", "lotacaoSetorId",
                                 RelationTraversalStrategy.INNER_JOIN_SCALAR, true),
                         new QueryAdapterFieldBinding(
                                 blueprint.resourceKey(), "resource.dependenteCpf",
-                                "ergon.dependentes.cpf", "dependentes.cpf",
+                                "workforce.dependents.cpf", "dependentes.cpf",
                                 RelationTraversalStrategy.CORRELATED_EXISTS_SUBQUERY, false)
                 )
         );
@@ -430,7 +430,7 @@ class P10RealHostCouplingIntegrationTest {
                                         List.of(new ComparisonPredicateIr(
                                                 SearchPredicateOperator.EQ,
                                                 "resource.lotacaoSetorId",
-                                                "ergon.afastamentos.lotacao_setor_id",
+                                                "workforce.leaves.lotacao_setor_id",
                                                 FactValueType.INT64,
                                                 new LiteralOperandIr(999L),
                                                 false
@@ -439,7 +439,7 @@ class P10RealHostCouplingIntegrationTest {
                                 new ComparisonPredicateIr(
                                         SearchPredicateOperator.EQ,
                                         "resource.dependenteCpf",
-                                        "ergon.dependentes.cpf",
+                                        "workforce.dependents.cpf",
                                         FactValueType.STRING,
                                         new LiteralOperandIr("11122233344"),
                                         false
@@ -469,8 +469,8 @@ class P10RealHostCouplingIntegrationTest {
                         Set.of("Accept"),
                         Map.of("subject.principalId", "usr-gestor-101", "subject.organizationUnitIds", List.of(100L)),
                         Map.of("subject.principalId", FactResolutionStatus.PRESENT, "subject.organizationUnitIds", FactResolutionStatus.PRESENT),
-                        Map.of(FieldUseCategory.FILTER, Set.of("ergon.afastamentos.cid_codigo")),
-                        List.of(new FieldUseEffectDirective("ergon.afastamentos.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
+                        Map.of(FieldUseCategory.FILTER, Set.of("workforce.leaves.cid_codigo")),
+                        List.of(new FieldUseEffectDirective("workforce.leaves.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
                         jpaAdapter,
                         "e.tenantId = :hardTenantId",
                         Map.of("hardTenantId", "tenant-gov-br"),
@@ -481,10 +481,10 @@ class P10RealHostCouplingIntegrationTest {
 
         // 2. Pre-Hydration Mutation (R-11: STEP_11 before STEP_12) + DualScopeDelegation + JdbcTransactionalAuditOutbox (P13, P14, P19, P22)
         Map<String, String> wireMap = Map.of(
-                "/lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id",
-                "/statusAfastamento", "ergon.afastamentos.status_afastamento",
-                "/substitutoServidorId", "ergon.afastamentos.substituto_servidor_id",
-                "/cidCodigo", "ergon.afastamentos.cid_codigo"
+                "/lotacaoSetorId", "workforce.leaves.lotacao_setor_id",
+                "/statusAfastamento", "workforce.leaves.status_afastamento",
+                "/substitutoServidorId", "workforce.leaves.substituto_servidor_id",
+                "/cidCodigo", "workforce.leaves.cid_codigo"
         );
         AtomicBoolean step12HydrationOrRulesExecuted = new AtomicBoolean(false);
         assertThrows(FieldWriteViolationException.class, () -> {
@@ -496,7 +496,7 @@ class P10RealHostCouplingIntegrationTest {
                     Map.of("statusAfastamento", "REVOGADO"),
                     wireMap,
                     Set.of("/version"),
-                    Set.of("ergon.afastamentos.lotacao_setor_id"),
+                    Set.of("workforce.leaves.lotacao_setor_id"),
                     blueprint.dualScopeSpec(),
                     false, // callerMatchesCedente = false
                     true,  // callerMatchesCessionario = true (cannot write Cedente field statusAfastamento!)
@@ -508,7 +508,7 @@ class P10RealHostCouplingIntegrationTest {
         assertFalse(step12HydrationOrRulesExecuted.get(), "STEP_12 (hydrate* / PraxisRulesEngine) must NEVER execute when STEP_11 fails");
 
         // Authorized Cessionário mutation on substitutoServidorId inside SQL transaction commits outbox and masks response
-        AfastamentoRecord updatedMasked = txTemplate.execute(status -> {
+        WorkforceLeaveRecord updatedMasked = txTemplate.execute(status -> {
             serviceSupport.authorizeBeforeHydrationAndRules(
                     blueprint.decisionPoint(),
                     blueprint.factContract().factContractDigest(),
@@ -517,7 +517,7 @@ class P10RealHostCouplingIntegrationTest {
                     Map.of("substitutoServidorId", 8888L),
                     wireMap,
                     Set.of("/version"),
-                    Set.of("ergon.afastamentos.lotacao_setor_id"),
+                    Set.of("workforce.leaves.lotacao_setor_id"),
                     blueprint.dualScopeSpec(),
                     false,
                     true,
@@ -529,8 +529,8 @@ class P10RealHostCouplingIntegrationTest {
             em.flush();
             return serviceSupport.completePostMutationOutboxAndMask(
                     managed.toRecord(),
-                    AfastamentoRecord.class,
-                    AfastamentoPilotRuntimeHost.defaultFieldSchemas()
+                    WorkforceLeaveRecord.class,
+                    WorkforceLeavePilotRuntimeHost.defaultFieldSchemas()
             );
         });
         assertNotNull(updatedMasked);
@@ -545,10 +545,10 @@ class P10RealHostCouplingIntegrationTest {
         AuthzGovernedCollectionExportExecutor governedExportExecutor = new AuthzGovernedCollectionExportExecutor(
                 baseExportExecutor,
                 maskingProcessor,
-                AfastamentoPilotRuntimeHost.defaultFieldSchemas(),
+                WorkforceLeavePilotRuntimeHost.defaultFieldSchemas(),
                 Set.of("cedenteOrgaoId"), // simulate @DomainGovernance(exportable = false) on cedenteOrgaoId
                 List.of(new MaskDirective(
-                        "ergon.afastamentos.cid_codigo",
+                        "workforce.leaves.cid_codigo",
                         "REDACT_CONSTANT",
                         Map.of("replacement", "***CID-RESTRITO***")
                 ))
@@ -566,7 +566,7 @@ class P10RealHostCouplingIntegrationTest {
         );
         CollectionExportResult csvResult = governedExportExecutor.export(
                 exportReq,
-                List.of(new AfastamentoRecord(101L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 8888L, "M54.5")),
+                List.of(new WorkforceLeaveRecord(101L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 8888L, "M54.5")),
                 exportFields,
                 (row, field) -> switch (field.key()) {
                     case "id" -> row.id();
@@ -702,7 +702,7 @@ class P10RealHostCouplingIntegrationTest {
                         DataScopeOutcome.NONE
                 )
         );
-        String unitKey = "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1";
+        String unitKey = "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1";
         var reconcileOutcome = configBridge.reconcileFromOperationalResolution(
                 "tenant-gov-br",
                 "prod",
@@ -769,21 +769,21 @@ class P10RealHostCouplingIntegrationTest {
         // P10.1-R01: FieldRefOperandIr column-to-column comparison + LIKE wildcard escaping in JpaCriteriaDataScopeTranslator
         QueryableFieldDescriptor cedenteDesc = new QueryableFieldDescriptor(
                 "resource.cedenteOrgaoId",
-                "ergon.afastamentos.cedente_orgao_id",
+                "workforce.leaves.cedente_orgao_id",
                 FactValueType.INT64,
                 Set.of(SearchPredicateOperator.EQ, SearchPredicateOperator.NE),
                 true
         );
         QueryableFieldDescriptor cessionarioDesc = new QueryableFieldDescriptor(
                 "resource.cessionarioOrgaoId",
-                "ergon.afastamentos.cessionario_orgao_id",
+                "workforce.leaves.cessionario_orgao_id",
                 FactValueType.INT64,
                 Set.of(SearchPredicateOperator.EQ, SearchPredicateOperator.NE),
                 true
         );
         QueryableFieldDescriptor statusDesc = new QueryableFieldDescriptor(
                 "resource.statusAfastamento",
-                "ergon.afastamentos.status_afastamento",
+                "workforce.leaves.status_afastamento",
                 FactValueType.STRING,
                 Set.of(SearchPredicateOperator.TEXT_CONTAINS),
                 false
@@ -803,13 +803,13 @@ class P10RealHostCouplingIntegrationTest {
                 fieldRefProj,
                 List.of(
                         new QueryAdapterFieldBinding(
-                                blueprint.resourceKey(), "resource.cedenteOrgaoId", "ergon.afastamentos.cedente_orgao_id",
+                                blueprint.resourceKey(), "resource.cedenteOrgaoId", "workforce.leaves.cedente_orgao_id",
                                 "cedenteOrgaoId", RelationTraversalStrategy.INNER_JOIN_SCALAR, true),
                         new QueryAdapterFieldBinding(
-                                blueprint.resourceKey(), "resource.cessionarioOrgaoId", "ergon.afastamentos.cessionario_orgao_id",
+                                blueprint.resourceKey(), "resource.cessionarioOrgaoId", "workforce.leaves.cessionario_orgao_id",
                                 "cessionarioOrgaoId", RelationTraversalStrategy.INNER_JOIN_SCALAR, true),
                         new QueryAdapterFieldBinding(
-                                blueprint.resourceKey(), "resource.statusAfastamento", "ergon.afastamentos.status_afastamento",
+                                blueprint.resourceKey(), "resource.statusAfastamento", "workforce.leaves.status_afastamento",
                                 "statusAfastamento", RelationTraversalStrategy.INNER_JOIN_SCALAR, true)
                 )
         );
@@ -829,9 +829,9 @@ class P10RealHostCouplingIntegrationTest {
                 new ComparisonPredicateIr(
                         SearchPredicateOperator.NE,
                         "resource.cedenteOrgaoId",
-                        "ergon.afastamentos.cedente_orgao_id",
+                        "workforce.leaves.cedente_orgao_id",
                         FactValueType.INT64,
-                        new FieldRefOperandIr("resource.cessionarioOrgaoId", "ergon.afastamentos.cessionario_orgao_id"),
+                        new FieldRefOperandIr("resource.cessionarioOrgaoId", "workforce.leaves.cessionario_orgao_id"),
                         false
                 )
         );
@@ -863,7 +863,7 @@ class P10RealHostCouplingIntegrationTest {
                 new ComparisonPredicateIr(
                         SearchPredicateOperator.TEXT_CONTAINS,
                         "resource.statusAfastamento",
-                        "ergon.afastamentos.status_afastamento",
+                        "workforce.leaves.status_afastamento",
                         FactValueType.STRING,
                         new LiteralOperandIr("%"),
                         false
@@ -884,9 +884,9 @@ class P10RealHostCouplingIntegrationTest {
         // P10.1-R02: Calling maskQueryResponseDtos without an active AuthorizedQueryScopeContext fails closed
         assertThrows(IllegalStateException.class, () ->
                 serviceSupport.maskQueryResponseDtos(
-                        List.of(new AfastamentoRecord(101L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 8888L, "M54.5")),
-                        AfastamentoRecord.class,
-                        AfastamentoPilotRuntimeHost.defaultFieldSchemas()
+                        List.of(new WorkforceLeaveRecord(101L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 8888L, "M54.5")),
+                        WorkforceLeaveRecord.class,
+                        WorkforceLeavePilotRuntimeHost.defaultFieldSchemas()
                 )
         );
 
@@ -894,13 +894,13 @@ class P10RealHostCouplingIntegrationTest {
         AuthzGovernedCollectionExportExecutor omitExportExecutor = new AuthzGovernedCollectionExportExecutor(
                 baseExportExecutor,
                 maskingProcessor,
-                AfastamentoPilotRuntimeHost.defaultFieldSchemas(),
+                WorkforceLeavePilotRuntimeHost.defaultFieldSchemas(),
                 Set.of("cedenteOrgaoId"),
-                List.of(new MaskDirective("ergon.afastamentos.cid_codigo", "OMIT", Map.of()))
+                List.of(new MaskDirective("workforce.leaves.cid_codigo", "OMIT", Map.of()))
         );
         CollectionExportResult omitCsvResult = omitExportExecutor.export(
                 exportReq,
-                List.of(new AfastamentoRecord(101L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 8888L, "M54.5")),
+                List.of(new WorkforceLeaveRecord(101L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 8888L, "M54.5")),
                 List.of(
                         new CollectionExportField("id", "ID", true, true, "number", "id"),
                         new CollectionExportField("aliasCedente", "Alias Cedente", true, true, "number", "cedenteOrgaoId"),

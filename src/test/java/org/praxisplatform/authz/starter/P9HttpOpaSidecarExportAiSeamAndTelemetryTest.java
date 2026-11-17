@@ -39,7 +39,7 @@ import org.praxisplatform.authz.export.GovernedCollectionExportGuard.SanitizedEx
 import org.praxisplatform.authz.opa.client.OpaClientTransport;
 import org.praxisplatform.authz.opa.client.OpaTransportResponse;
 import org.praxisplatform.authz.opa.revision.OpaEvaluationFailureException;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.praxisplatform.authz.seams.DeclarativeDecisionPointExecutionTemplate;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.AiGovernanceMetadataView;
@@ -70,7 +70,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
 
     @Test
     void verifyP9HttpClientOpaTransportOverLoopbackSidecarAndFailClosedErrors() throws Exception {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
         AtomicReference<String> faultMode = new AtomicReference<>("NONE");
 
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -233,14 +233,14 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
 
     @Test
     void verifyP9GovernedExportAndAiToolSeamAndSanitizedTelemetry() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
         MethodBindingAdmissionRecord baseRecord = blueprint.admissionRecords().getFirst();
         String pointKey = baseRecord.decisionPoint().identity().pointKey();
 
         // Enrich lineage entries to test P56 (ancestor restriction inheritance), P57 (un-governed fail-closed), and P62 (METADATA_ONLY vs ALLOWED)
         List<FieldLineageCatalogEntry> enrichedLineage = List.of(
                 new FieldLineageCatalogEntry(
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "concept:hr:org-unit",
                         "schema://human-resources.afastamentos/ResponseDTO",
                         "lotacaoSetorId",
@@ -253,7 +253,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                         true
                 ),
                 new FieldLineageCatalogEntry(
-                        "ergon.afastamentos.cid_codigo",
+                        "workforce.leaves.cid_codigo",
                         "concept:health:icd10",
                         "schema://human-resources.afastamentos/ResponseDTO",
                         "cidCodigo",
@@ -266,7 +266,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                         true
                 ),
                 new FieldLineageCatalogEntry(
-                        "ergon.afastamentos.cid_resumo_derivado",
+                        "workforce.leaves.cid_resumo_derivado",
                         "concept:health:icd10-summary",
                         "schema://human-resources.afastamentos/ResponseDTO",
                         "cidResumoDerivado",
@@ -275,11 +275,11 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                         "ALLOWED", // attempts to widen AI usage, but ancestor cid_codigo is DENIED and exportable=false (P56/P60)!
                         true,
                         Set.of(FieldUseCategory.VALUE),
-                        List.of("ergon.afastamentos.cid_codigo"),
+                        List.of("workforce.leaves.cid_codigo"),
                         true
                 ),
                 new FieldLineageCatalogEntry(
-                        "ergon.afastamentos.substituto_servidor_id",
+                        "workforce.leaves.substituto_servidor_id",
                         "concept:hr:substitute-employee",
                         "schema://human-resources.afastamentos/ResponseDTO",
                         "substitutoServidorId",
@@ -292,7 +292,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                         true
                 ),
                 new FieldLineageCatalogEntry(
-                        "ergon.afastamentos.observacao_sem_governanca",
+                        "workforce.leaves.observacao_sem_governanca",
                         "concept:hr:unclassified-note",
                         "schema://human-resources.afastamentos/ResponseDTO",
                         "observacaoSemGovernanca",
@@ -305,7 +305,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                         false // P57: explicitGovernanceDeclared = false -> must fail closed for AI!
                 ),
                 new FieldLineageCatalogEntry(
-                        "ergon.afastamentos.derivado_ancestral_inexistente",
+                        "workforce.leaves.derivado_ancestral_inexistente",
                         "concept:hr:dangling-parent",
                         "schema://human-resources.afastamentos/ResponseDTO",
                         "derivadoAncestralInexistente",
@@ -314,7 +314,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                         "ALLOWED",
                         true,
                         Set.of(FieldUseCategory.VALUE),
-                        List.of("ergon.afastamentos.ancestral_fantasma"), // P45/P56/P60: dangling upstream parent -> fail closed!
+                        List.of("workforce.leaves.ancestral_fantasma"), // P45/P56/P60: dangling upstream parent -> fail closed!
                         true
                 )
         );
@@ -351,13 +351,13 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                             (InMemoryTransactionalAuditOutbox) context.getBean(TransactionalAuditOutboxPort.class);
 
                     List<DtoFieldSchemaMetadata> fieldSchemas = List.of(
-                            new DtoFieldSchemaMetadata("lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id", FactValueType.INT64, false),
-                            new DtoFieldSchemaMetadata("cidCodigo", "ergon.afastamentos.cid_codigo", FactValueType.STRING, true),
-                            new DtoFieldSchemaMetadata("cidResumoDerivado", "ergon.afastamentos.cid_resumo_derivado", FactValueType.STRING, true),
-                            new DtoFieldSchemaMetadata("substitutoServidorId", "ergon.afastamentos.substituto_servidor_id", FactValueType.INT64, true),
-                            new DtoFieldSchemaMetadata("observacaoSemGovernanca", "ergon.afastamentos.observacao_sem_governanca", FactValueType.STRING, true),
-                            new DtoFieldSchemaMetadata("derivadoAncestralInexistente", "ergon.afastamentos.derivado_ancestral_inexistente", FactValueType.STRING, true),
-                            new DtoFieldSchemaMetadata("campoNaoCatalogado", "ergon.afastamentos.campo_nao_catalogado", FactValueType.STRING, true)
+                            new DtoFieldSchemaMetadata("lotacaoSetorId", "workforce.leaves.lotacao_setor_id", FactValueType.INT64, false),
+                            new DtoFieldSchemaMetadata("cidCodigo", "workforce.leaves.cid_codigo", FactValueType.STRING, true),
+                            new DtoFieldSchemaMetadata("cidResumoDerivado", "workforce.leaves.cid_resumo_derivado", FactValueType.STRING, true),
+                            new DtoFieldSchemaMetadata("substitutoServidorId", "workforce.leaves.substituto_servidor_id", FactValueType.INT64, true),
+                            new DtoFieldSchemaMetadata("observacaoSemGovernanca", "workforce.leaves.observacao_sem_governanca", FactValueType.STRING, true),
+                            new DtoFieldSchemaMetadata("derivadoAncestralInexistente", "workforce.leaves.derivado_ancestral_inexistente", FactValueType.STRING, true),
+                            new DtoFieldSchemaMetadata("campoNaoCatalogado", "workforce.leaves.campo_nao_catalogado", FactValueType.STRING, true)
                     );
 
                     Map<String, Object> row1 = Map.of(
@@ -462,12 +462,12 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                     assertEquals(List.of("lotacaoSetorId"), aiProjection.allowedWireColumns());
                     assertEquals(Map.of("lotacaoSetorId", 100L), aiProjection.detachedPayload());
                     assertTrue(aiProjection.suppressedAiAttributeIds().containsAll(Set.of(
-                            "ergon.afastamentos.cid_codigo",
-                            "ergon.afastamentos.cid_resumo_derivado",
-                            "ergon.afastamentos.substituto_servidor_id",
-                            "ergon.afastamentos.observacao_sem_governanca",
-                            "ergon.afastamentos.derivado_ancestral_inexistente",
-                            "ergon.afastamentos.campo_nao_catalogado"
+                            "workforce.leaves.cid_codigo",
+                            "workforce.leaves.cid_resumo_derivado",
+                            "workforce.leaves.substituto_servidor_id",
+                            "workforce.leaves.observacao_sem_governanca",
+                            "workforce.leaves.derivado_ancestral_inexistente",
+                            "workforce.leaves.campo_nao_catalogado"
                     )));
 
                     // 4. P62: Metadata-only governance inspection for AI authoring succeeds for authorized catalog reader without exposing values
@@ -497,7 +497,7 @@ class P9HttpOpaSidecarExportAiSeamAndTelemetryTest {
                     assertEquals(4, telemetryPublisher.recentEvents(10).size());
                     String telemetryJson = telemetryPublisher.toStructuredJsonLog(sinkEvents.getFirst());
                     assertTrue(telemetryJson.contains(pointKey));
-                    assertTrue(telemetryJson.contains("ergon.afastamentos.cid_codigo"));
+                    assertTrue(telemetryJson.contains("workforce.leaves.cid_codigo"));
                     assertTrue(telemetryJson.contains("DURABLE_AUDIT_EVIDENCE"));
                     assertFalse(telemetryJson.contains("F32.1-SECRET-HEALTH-CODE"));
                     assertFalse(telemetryJson.contains("***CID-RESTRITO***"));

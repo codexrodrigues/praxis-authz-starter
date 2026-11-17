@@ -118,7 +118,7 @@ class AuthzAutoIntrospectedSpecTest {
     }
 
     @ApiResource(
-            value = "/api/ergon/processos-progressao",
+            value = "/api/workforce/processos-progressao",
             resourceKey = "administracao-pessoal.processos-progressao",
             title = "Processos de progressão")
     static class SampleProgressaoController {
@@ -175,7 +175,7 @@ class AuthzAutoIntrospectedSpecTest {
     void fromAnnotatedResourceSynthesizesCompleteGovernanceSpecAndCompilesOpaBootstrapBundle() {
         AuthzResourceGovernanceSpec<SampleProgressaoEntity> spec =
                 AuthzResourceGovernanceSpec.fromAnnotatedResource(
-                        "praxis-ergon-showcase",
+                        "praxis-workforce-showcase",
                         "empCodigo",
                         SampleProgressaoEntity.class,
                         SampleProgressaoResponseDTO.class,
@@ -185,7 +185,7 @@ class AuthzAutoIntrospectedSpecTest {
 
         assertThat(spec.resourceKey()).isEqualTo("administracao-pessoal.processos-progressao");
         assertThat(spec.decisionPoint().httpMethod()).isEqualTo("POST");
-        assertThat(spec.decisionPoint().canonicalPath()).isEqualTo("/api/ergon/processos-progressao/filter");
+        assertThat(spec.decisionPoint().canonicalPath()).isEqualTo("/api/workforce/processos-progressao/filter");
         assertThat(spec.technicalConcurrencyPointers()).contains("/version", "/lockVersion");
         assertThat(spec.buildHardScopeParams("1")).containsEntry(AuthzResourceGovernanceSpec.HARD_TENANT_PARAM, 1);
 
@@ -220,30 +220,30 @@ class AuthzAutoIntrospectedSpecTest {
         DecisionPointDescriptor itemAction = spec.actionDecisionPoints().get("homologar-progressao");
         assertThat(itemAction).isNotNull();
         assertThat(itemAction.canonicalPath())
-                .isEqualTo("/api/ergon/processos-progressao/{id}/actions/homologar-progressao");
+                .isEqualTo("/api/workforce/processos-progressao/{id}/actions/homologar-progressao");
         assertThat(itemAction.evaluationModes()).containsExactly(EvaluationMode.TARGET);
 
         DecisionPointDescriptor bulkAction = spec.actionDecisionPoints().get("homologar-progressao-lote");
         assertThat(bulkAction).isNotNull();
         assertThat(bulkAction.canonicalPath())
-                .isEqualTo("/api/ergon/processos-progressao/actions/homologar-progressao-lote");
+                .isEqualTo("/api/workforce/processos-progressao/actions/homologar-progressao-lote");
         assertThat(bulkAction.evaluationModes()).containsExactlyInAnyOrder(EvaluationMode.SEARCH, EvaluationMode.TARGET);
         assertThat(bulkAction.supportedCapabilities()).contains(EnforcementCapability.DATA_SCOPE);
 
         DecisionPointDescriptor detailSurface = spec.surfaceDecisionPoints().get("detail");
         assertThat(detailSurface).isNotNull();
         assertThat(detailSurface.httpMethod()).isEqualTo("GET");
-        assertThat(detailSurface.canonicalPath()).isEqualTo("/api/ergon/processos-progressao/{id}/detail");
+        assertThat(detailSurface.canonicalPath()).isEqualTo("/api/workforce/processos-progressao/{id}/detail");
 
         DecisionPointDescriptor patchSurface = spec.surfaceDecisionPoints().get("registrar-avaliacao");
         assertThat(patchSurface).isNotNull();
         assertThat(patchSurface.httpMethod()).isEqualTo("PATCH");
-        assertThat(patchSurface.canonicalPath()).isEqualTo("/api/ergon/processos-progressao/{id}/registrar-avaliacao");
+        assertThat(patchSurface.canonicalPath()).isEqualTo("/api/workforce/processos-progressao/{id}/registrar-avaliacao");
 
         // Empty-subpath @GetMapping resolves cleanly to basePath, and @ManyToOne(optional = false) + @JoinColumn(nullable = false) is non-nullable
         DecisionPointDescriptor rootSurface = spec.surfaceDecisionPoints().get("painel-raiz");
         assertThat(rootSurface).isNotNull();
-        assertThat(rootSurface.canonicalPath()).isEqualTo("/api/ergon/processos-progressao");
+        assertThat(rootSurface.canonicalPath()).isEqualTo("/api/workforce/processos-progressao");
         assertThat(spec.fieldBindings())
                 .filteredOn(binding -> "resource.setor_sigla".equals(binding.fieldPath()))
                 .singleElement()
@@ -253,7 +253,7 @@ class AuthzAutoIntrospectedSpecTest {
 
         // Compile full OPA bundle with organizational scope, item action, bulk action, and surface policies
         AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
-                AuthzHostPolicyBootstrapBuilder.forService("praxis-ergon-showcase")
+                AuthzHostPolicyBootstrapBuilder.forService("praxis-workforce-showcase")
                         .addResourceSpec(spec, SampleProgressaoResponseDTO.class, null, null)
                         .addOrganizationalScopePolicy(
                                 spec,

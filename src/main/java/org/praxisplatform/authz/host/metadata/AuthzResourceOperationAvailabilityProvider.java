@@ -60,7 +60,9 @@ public final class AuthzResourceOperationAvailabilityProvider
             Map<String, FactResolutionStatus> trustedSubjectFactStatuses,
             boolean callerMatchesCedente,
             boolean callerMatchesCessionario,
-            String tenantId
+            String tenantId,
+            Set<String> allowedHardScopeValues,
+            boolean sharedUnrestrictedScope
     ) {
         /** Compact constructor enforcing non-null maps. */
         public CallerAvailabilityFactContext {
@@ -68,6 +70,62 @@ public final class AuthzResourceOperationAvailabilityProvider
             trustedSubjectFactStatuses = trustedSubjectFactStatuses == null
                     ? Map.of()
                     : Map.copyOf(trustedSubjectFactStatuses);
+            allowedHardScopeValues = allowedHardScopeValues == null ? null : Set.copyOf(allowedHardScopeValues);
+        }
+
+        /** Builds caller availability context resolving multi-org hard-scope values from {@code spec}. */
+        public static CallerAvailabilityFactContext fromGovernanceSpec(
+                AuthzResourceGovernanceSpec<?> spec,
+                AuthzCallerContext callerCtx,
+                boolean callerMatchesOrigin,
+                boolean callerMatchesDestination
+        ) {
+            Objects.requireNonNull(spec, "spec is required");
+            Objects.requireNonNull(callerCtx, "callerCtx is required");
+            HardScopeResolver.HardScopeSelection selection = spec.resolveHardScopeSelection(callerCtx);
+            Set<String> allowed = null;
+            boolean shared = selection.isSharedUnrestricted();
+            if (!shared) {
+                if (selection.isDenied()) {
+                    allowed = Set.of();
+                } else {
+                    Set<String> values = new java.util.LinkedHashSet<>();
+                    for (Object value : selection.multiValues()) {
+                        if (value != null) {
+                            values.add(String.valueOf(value));
+                        }
+                    }
+                    allowed = Set.copyOf(values);
+                }
+            }
+            return new CallerAvailabilityFactContext(
+                    callerCtx.subjectAndEnvironmentFacts(),
+                    callerCtx.factStatuses(),
+                    callerMatchesOrigin,
+                    callerMatchesDestination,
+                    callerCtx.tenantId(),
+                    allowed,
+                    shared
+            );
+        }
+
+        /** Backward-compatible 5-argument constructor. */
+        public CallerAvailabilityFactContext(
+                Map<String, Object> trustedSubjectFacts,
+                Map<String, FactResolutionStatus> trustedSubjectFactStatuses,
+                boolean callerMatchesCedente,
+                boolean callerMatchesCessionario,
+                String tenantId
+        ) {
+            this(
+                    trustedSubjectFacts,
+                    trustedSubjectFactStatuses,
+                    callerMatchesCedente,
+                    callerMatchesCessionario,
+                    tenantId,
+                    null,
+                    false
+            );
         }
 
         /** Backward-compatible 4-argument constructor. */
@@ -584,9 +642,17 @@ public final class AuthzResourceOperationAvailabilityProvider
                     Map.copyOf(missingCallerMeta)
             );
         }
-        if (itemScope && snapshot != null && callerCtx.tenantId() != null) {
+        if (itemScope && snapshot != null && !callerCtx.sharedUnrestrictedScope()) {
             Object snapshotTenant = snapshot.metadata().get(AuthzResourceGovernanceSpec.SNAPSHOT_TENANT_META_KEY);
-            if (snapshotTenant != null && !Objects.equals(callerCtx.tenantId(), String.valueOf(snapshotTenant))) {
+            boolean mismatch = false;
+            if (callerCtx.allowedHardScopeValues() != null) {
+                mismatch = snapshotTenant != null
+                        && !callerCtx.allowedHardScopeValues().contains(String.valueOf(snapshotTenant));
+            } else if (callerCtx.tenantId() != null) {
+                mismatch = snapshotTenant != null
+                        && !Objects.equals(callerCtx.tenantId(), String.valueOf(snapshotTenant));
+            }
+            if (mismatch) {
                 Map<String, Object> tenantMismatchMeta = new LinkedHashMap<>();
                 tenantMismatchMeta.put("decisionPointKey", effectiveDecisionPoint.identity().pointKey());
                 if (operationId != null && !operationId.isBlank()) {

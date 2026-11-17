@@ -63,10 +63,10 @@ import org.praxisplatform.authz.enforcement.writeintent.FieldWriteAuthorizer;
  *   <li>Per-item mid-batch revocation revalidation and reader-isolated idempotent command receipts.</li>
  * </ul>
  */
-public final class AfastamentoPilotRuntimeHost {
+public final class WorkforceLeavePilotRuntimeHost {
 
     /** Canonical persisted record for the {@code Afastamento} pilot showcase. */
-    public record AfastamentoRecord(
+    public record WorkforceLeaveRecord(
             Long id,
             String tenantId,
             Long orgCedenteId,
@@ -89,7 +89,7 @@ public final class AfastamentoPilotRuntimeHost {
 
     /** Mutation execution outcome proving {@code STEP_12} raw calculation + {@code STEP_14} detached masking ({@code P13}, {@code P14}, {@code P40}). */
     public record DualScopeMutationOutcome(
-            AfastamentoRecord storedUnmaskedEntity,
+            WorkforceLeaveRecord storedUnmaskedEntity,
             boolean computedRequiresMedicalBoardInStep12,
             DetachedDtoMaskingResult maskedDetachedResponse,
             WriteIntent extractedWriteIntent
@@ -109,7 +109,7 @@ public final class AfastamentoPilotRuntimeHost {
             Map<String, Object> receiptPayload
     ) {}
 
-    private final AfastamentoAuthzPilotBlueprint blueprint;
+    private final WorkforceLeaveAuthzPilotBlueprint blueprint;
     private final AuthorizationProviderPort providerPort;
     private final FieldUseQueryGuard fieldUseQueryGuard;
     private final DtoWriteIntentExtractor writeIntentExtractor;
@@ -117,11 +117,11 @@ public final class AfastamentoPilotRuntimeHost {
     private final DetachedDtoMaskingProcessor maskingProcessor;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private final Map<Long, AfastamentoRecord> repository = new ConcurrentHashMap<>();
+    private final Map<Long, WorkforceLeaveRecord> repository = new ConcurrentHashMap<>();
     private final Map<String, IdempotentCommandEntry> idempotencyStore = new ConcurrentHashMap<>();
 
-    public AfastamentoPilotRuntimeHost(
-            AfastamentoAuthzPilotBlueprint blueprint,
+    public WorkforceLeavePilotRuntimeHost(
+            WorkforceLeaveAuthzPilotBlueprint blueprint,
             AuthorizationProviderPort providerPort,
             FieldUseQueryGuard fieldUseQueryGuard,
             DtoWriteIntentExtractor writeIntentExtractor,
@@ -138,21 +138,21 @@ public final class AfastamentoPilotRuntimeHost {
     }
 
     private void seedDefaultPilotData() {
-        repository.put(10L, new AfastamentoRecord(
+        repository.put(10L, new WorkforceLeaveRecord(
                 10L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 5001L, "M54.5"));
-        repository.put(20L, new AfastamentoRecord(
+        repository.put(20L, new WorkforceLeaveRecord(
                 20L, "tenant-gov-br", 1L, 2L, 200L, "EM_ANALISE", 5002L, "J06.9"));
-        repository.put(30L, new AfastamentoRecord(
+        repository.put(30L, new WorkforceLeaveRecord(
                 30L, "tenant-gov-br", 3L, 4L, 300L, "DEFERIDO", 5003L, "F32.0"));
-        repository.put(40L, new AfastamentoRecord(
+        repository.put(40L, new WorkforceLeaveRecord(
                 40L, "tenant-other", 1L, 2L, 100L, "DEFERIDO", 5004L, "A09"));
     }
 
-    public AfastamentoRecord findRawUnmaskedInRepository(Long id) {
+    public WorkforceLeaveRecord findRawUnmaskedInRepository(Long id) {
         return repository.get(id);
     }
 
-    public void upsertRawRecord(AfastamentoRecord record) {
+    public void upsertRawRecord(WorkforceLeaveRecord record) {
         repository.put(record.id(), record);
     }
 
@@ -199,11 +199,11 @@ public final class AfastamentoPilotRuntimeHost {
         }
 
         // 3. Build unified predicate: Hard Scope (tenant + orgCedente/orgCessionaria) AND 3VL Kleene DataScopePlan (CC03, P07)
-        Predicate<AfastamentoRecord> unifiedPredicate = record ->
+        Predicate<WorkforceLeaveRecord> unifiedPredicate = record ->
                 matchesHardScope(record, callerTenantId, callerHardScopeOrgIds)
                         && matchesDataScopePlan(record, dataScopePlan);
 
-        List<AfastamentoRecord> scopedRecords = repository.values().stream()
+        List<WorkforceLeaveRecord> scopedRecords = repository.values().stream()
                 .filter(unifiedPredicate)
                 .sorted((a, b) -> Long.compare(a.id(), b.id()))
                 .toList();
@@ -265,7 +265,7 @@ public final class AfastamentoPilotRuntimeHost {
     }
 
     /**
-     * Executes a governed {@code PUT} or {@code PATCH} mutation on an {@code AfastamentoRecord},
+     * Executes a governed {@code PUT} or {@code PATCH} mutation on an {@code WorkforceLeaveRecord},
      * enforcing:
      * <ul>
      *   <li>{@code WriteIntent} extraction distinguishing omitted vs explicit {@code null} ({@code P13});</li>
@@ -284,18 +284,18 @@ public final class AfastamentoPilotRuntimeHost {
             Set<Long> callerAllowedLotacaoIds,
             List<MaskDirective> responseMaskDirectives
     ) {
-        AfastamentoRecord existing = repository.get(recordId);
+        WorkforceLeaveRecord existing = repository.get(recordId);
         if (existing == null || !existing.tenantId().equals(callerTenantId)) {
             throw new SecurityException("AUTHZ_ITEM_NOT_IN_SCOPE_OR_NOT_FOUND: id=" + recordId);
         }
 
         Map<String, String> attributeIdByWirePath = Map.of(
-                "/orgCedenteId", "ergon.afastamentos.org_cedente_id",
-                "/orgCessionariaId", "ergon.afastamentos.org_cessionaria_id",
-                "/lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id",
-                "/statusAfastamento", "ergon.afastamentos.status_afastamento",
-                "/substitutoServidorId", "ergon.afastamentos.substituto_servidor_id",
-                "/cidCodigo", "ergon.afastamentos.cid_codigo"
+                "/orgCedenteId", "workforce.leaves.org_cedente_id",
+                "/orgCessionariaId", "workforce.leaves.org_cessionaria_id",
+                "/lotacaoSetorId", "workforce.leaves.lotacao_setor_id",
+                "/statusAfastamento", "workforce.leaves.status_afastamento",
+                "/substitutoServidorId", "workforce.leaves.substituto_servidor_id",
+                "/cidCodigo", "workforce.leaves.cid_codigo"
         );
 
         WriteIntent writeIntent = writeIntentExtractor.extractFromJson(
@@ -330,9 +330,9 @@ public final class AfastamentoPilotRuntimeHost {
             fieldWriteAuthorizer.enforceFieldWriteDirectives(writeIntent, targetEnvelope.combinedFieldWriteEffects(), true);
 
             Set<String> mandatoryScopeAnchorAttrs = Set.of(
-                    "ergon.afastamentos.org_cedente_id",
-                    "ergon.afastamentos.org_cessionaria_id",
-                    "ergon.afastamentos.lotacao_setor_id"
+                    "workforce.leaves.org_cedente_id",
+                    "workforce.leaves.org_cessionaria_id",
+                    "workforce.leaves.lotacao_setor_id"
             );
 
             // 2. P14: Enforce dual-scope cedente vs cessionário field custody on business attributes
@@ -394,23 +394,23 @@ public final class AfastamentoPilotRuntimeHost {
             }
 
             // 5. Apply mutation to build the updated entity (preserving omitted fields in PATCH, clearing omitted nullable fields in PUT)
-            String newStatus = writeIntent.modifiedAttributeIds().contains("ergon.afastamentos.status_afastamento")
+            String newStatus = writeIntent.modifiedAttributeIds().contains("workforce.leaves.status_afastamento")
                     ? (payloadNode.has("statusAfastamento") && !payloadNode.get("statusAfastamento").isNull()
                             ? payloadNode.get("statusAfastamento").asText()
                             : null)
                     : existing.statusAfastamento();
-            Long newSubstituto = writeIntent.modifiedAttributeIds().contains("ergon.afastamentos.substituto_servidor_id")
+            Long newSubstituto = writeIntent.modifiedAttributeIds().contains("workforce.leaves.substituto_servidor_id")
                     ? (payloadNode.has("substitutoServidorId") && !payloadNode.get("substitutoServidorId").isNull()
                             ? payloadNode.get("substitutoServidorId").asLong()
                             : null)
                     : existing.substitutoServidorId();
-            String newCid = writeIntent.modifiedAttributeIds().contains("ergon.afastamentos.cid_codigo")
+            String newCid = writeIntent.modifiedAttributeIds().contains("workforce.leaves.cid_codigo")
                     ? (payloadNode.has("cidCodigo") && !payloadNode.get("cidCodigo").isNull()
                             ? payloadNode.get("cidCodigo").asText()
                             : null)
                     : existing.cidCodigo();
 
-            AfastamentoRecord updatedEntity = new AfastamentoRecord(
+            WorkforceLeaveRecord updatedEntity = new WorkforceLeaveRecord(
                     existing.id(),
                     existing.tenantId(),
                     newOrgCedenteId,
@@ -525,17 +525,17 @@ public final class AfastamentoPilotRuntimeHost {
     }
 
     private List<DetachedDtoMaskingResult> projectRows(
-            List<AfastamentoRecord> rows,
+            List<WorkforceLeaveRecord> rows,
             Collection<DtoFieldSchemaMetadata> fieldSchemas,
             List<MaskDirective> defaultMasks,
             Set<String> policyValueDeniedAttributes,
             Set<Long> rowIdsWithExtraValueDenyOnSubstituto
     ) {
         List<DetachedDtoMaskingProcessor.RowMaskingInput> inputs = new ArrayList<>(rows.size());
-        for (AfastamentoRecord row : rows) {
+        for (WorkforceLeaveRecord row : rows) {
             Set<String> rowValueDenied = new LinkedHashSet<>(policyValueDeniedAttributes);
             if (rowIdsWithExtraValueDenyOnSubstituto.contains(row.id())) {
-                rowValueDenied.add("ergon.afastamentos.substituto_servidor_id");
+                rowValueDenied.add("workforce.leaves.substituto_servidor_id");
             }
             inputs.add(new DetachedDtoMaskingProcessor.RowMaskingInput(row, Set.copyOf(rowValueDenied), defaultMasks));
         }
@@ -543,7 +543,7 @@ public final class AfastamentoPilotRuntimeHost {
     }
 
     private boolean matchesHardScope(
-            AfastamentoRecord record,
+            WorkforceLeaveRecord record,
             String callerTenantId,
             Set<Long> callerHardScopeOrgIds
     ) {
@@ -554,7 +554,7 @@ public final class AfastamentoPilotRuntimeHost {
                 || callerHardScopeOrgIds.contains(record.orgCessionariaId());
     }
 
-    private boolean matchesDataScopePlan(AfastamentoRecord record, DataScopePlan plan) {
+    private boolean matchesDataScopePlan(WorkforceLeaveRecord record, DataScopePlan plan) {
         if (plan.scopeOutcome() == DataScopeOutcome.ALL) {
             return true;
         }
@@ -565,15 +565,15 @@ public final class AfastamentoPilotRuntimeHost {
     }
 
     /**
-     * Evaluates a {@link SearchPredicateIr} against an {@link AfastamentoRecord} using the canonical
+     * Evaluates a {@link SearchPredicateIr} against an {@link WorkforceLeaveRecord} using the canonical
      * 3-valued Kleene logic evaluator ({@code CC03}, {@code P07}), ensuring {@code UNKNOWN} on absent/null
      * attributes is never inverted to {@code TRUE} by {@code NOT} and never selects the row.
      */
-    public KleeneTruthValue evaluateKleenePredicateOnRecord(AfastamentoRecord record, SearchPredicateIr predicate) {
+    public KleeneTruthValue evaluateKleenePredicateOnRecord(WorkforceLeaveRecord record, SearchPredicateIr predicate) {
         return KleeneSearchPredicateEvaluator.evaluate(predicate, toResolvedResourceFacts(record));
     }
 
-    private Map<String, ResolvedFactValue> toResolvedResourceFacts(AfastamentoRecord record) {
+    private Map<String, ResolvedFactValue> toResolvedResourceFacts(WorkforceLeaveRecord record) {
         Map<String, ResolvedFactValue> facts = new LinkedHashMap<>();
         facts.put("resource.id", ResolvedFactValue.present("resource.id", record.id()));
         facts.put("resource.tenantId", ResolvedFactValue.present("resource.tenantId", record.tenantId()));
@@ -617,7 +617,7 @@ public final class AfastamentoPilotRuntimeHost {
     private ProviderInputProjection buildTargetProjection(
             String callerPrincipalId,
             Set<Long> callerLotacaoSetorIds,
-            AfastamentoRecord existing
+            WorkforceLeaveRecord existing
     ) {
         return new ProviderInputProjection(
                 ProviderInputProjection.SCHEMA_VERSION_V1,
@@ -641,13 +641,13 @@ public final class AfastamentoPilotRuntimeHost {
 
     public static List<DtoFieldSchemaMetadata> defaultFieldSchemas() {
         return List.of(
-                new DtoFieldSchemaMetadata("id", "ergon.afastamentos.id", FactValueType.INT64, false),
-                new DtoFieldSchemaMetadata("orgCedenteId", "ergon.afastamentos.org_cedente_id", FactValueType.INT64, false),
-                new DtoFieldSchemaMetadata("orgCessionariaId", "ergon.afastamentos.org_cessionaria_id", FactValueType.INT64, false),
-                new DtoFieldSchemaMetadata("lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id", FactValueType.INT64, false),
-                new DtoFieldSchemaMetadata("statusAfastamento", "ergon.afastamentos.status_afastamento", FactValueType.STRING, false),
-                new DtoFieldSchemaMetadata("substitutoServidorId", "ergon.afastamentos.substituto_servidor_id", FactValueType.INT64, true),
-                new DtoFieldSchemaMetadata("cidCodigo", "ergon.afastamentos.cid_codigo", FactValueType.STRING, true)
+                new DtoFieldSchemaMetadata("id", "workforce.leaves.id", FactValueType.INT64, false),
+                new DtoFieldSchemaMetadata("orgCedenteId", "workforce.leaves.org_cedente_id", FactValueType.INT64, false),
+                new DtoFieldSchemaMetadata("orgCessionariaId", "workforce.leaves.org_cessionaria_id", FactValueType.INT64, false),
+                new DtoFieldSchemaMetadata("lotacaoSetorId", "workforce.leaves.lotacao_setor_id", FactValueType.INT64, false),
+                new DtoFieldSchemaMetadata("statusAfastamento", "workforce.leaves.status_afastamento", FactValueType.STRING, false),
+                new DtoFieldSchemaMetadata("substitutoServidorId", "workforce.leaves.substituto_servidor_id", FactValueType.INT64, true),
+                new DtoFieldSchemaMetadata("cidCodigo", "workforce.leaves.cid_codigo", FactValueType.STRING, true)
         );
     }
 }

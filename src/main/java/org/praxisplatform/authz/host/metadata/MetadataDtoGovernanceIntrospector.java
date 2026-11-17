@@ -32,10 +32,18 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.praxisplatform.authz.catalog.FieldLineageCatalogEntry;
+import org.praxisplatform.authz.contracts.annotation.AuthzCustodyPartition;
+import org.praxisplatform.authz.contracts.annotation.AuthzMask;
+import org.praxisplatform.authz.contracts.annotation.AuthzMaskStrategy;
+import org.praxisplatform.authz.contracts.annotation.AuthzMasks;
+import org.praxisplatform.authz.contracts.annotation.AuthzScopeAnchor;
 import org.praxisplatform.authz.contracts.context.FactValueType;
+import org.praxisplatform.authz.contracts.decisionpoint.EvaluationMode;
 import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
 import org.praxisplatform.authz.contracts.envelope.FieldUseEffectDirective;
 import org.praxisplatform.authz.contracts.envelope.RuleEffect;
+import org.praxisplatform.authz.contracts.policy.MaskContributionSpec;
+import org.praxisplatform.authz.contracts.policy.PolicyFieldSelector;
 import org.praxisplatform.authz.enforcement.jpa.QueryAdapterFieldBinding;
 import org.praxisplatform.authz.enforcement.masking.DtoFieldSchemaMetadata;
 import org.praxisplatform.uischema.annotation.AiVisibilityMode;
@@ -47,16 +55,41 @@ import org.praxisplatform.uischema.extension.ResolverUtils;
 import org.praxisplatform.uischema.filter.annotation.Filterable;
 import org.praxisplatform.uischema.schema.DomainLineageResolver;
 import org.praxisplatform.uischema.schema.DomainSchemaGovernance;
+import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.data.domain.Sort;
 import org.springframework.util.ClassUtils;
 
 /**
  * Introspects Praxis DTO classes ({@code ResponseDTO}, {@code CreateDTO}, {@code UpdateDTO},
- * {@code FilterDTO}) annotated with {@link DomainLineage}, {@link DomainGovernance}, and
- * {@link Schema} to automatically derive authorization and governance contracts without manual
- * boilerplate ({@code CC07}, {@code CC09}, {@code P11}, {@code P12}, {@code P16}, {@code P44..P50}).
+ * {@code FilterDTO}) annotated with {@link DomainLineage}, {@link DomainGovernance},
+ * {@link AuthzMask}, and {@link Schema} to automatically derive authorization, masking, and
+ * governance contracts without manual boilerplate ({@code CC07}, {@code CC09}, {@code P11},
+ * {@code P12}, {@code P16}, {@code P44..P50}).
  */
 public final class MetadataDtoGovernanceIntrospector {
+
+    /**
+     * Declarative mask binding extracted from {@link AuthzMask} including mode and surface scope.
+     *
+     * @param contribution compiled {@link MaskContributionSpec}
+     * @param modes evaluation modes in which this mask applies
+     * @param surfaces optional target {@code @UiSurface} identifiers (empty = all surfaces)
+     * @param reason optional human-readable rationale
+     */
+    public record DeclaredMaskSpec(
+            MaskContributionSpec contribution,
+            Set<EvaluationMode> modes,
+            Set<String> surfaces,
+            String reason
+    ) {
+        public DeclaredMaskSpec {
+            Objects.requireNonNull(contribution, "contribution is required");
+            modes = modes == null || modes.isEmpty()
+                    ? Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET)
+                    : Set.copyOf(modes);
+            surfaces = surfaces == null ? Set.of() : Set.copyOf(surfaces);
+        }
+    }
 
     /**
      * Immutable governance and schema contract derived from a DTO class.
@@ -68,6 +101,8 @@ public final class MetadataDtoGovernanceIntrospector {
      * @param aiContextDeniedAttributeIds attribute IDs with {@link AiVisibilityMode#DENY}
      * @param baselineFieldUseDirectives baseline {@link FieldUseEffectDirective}s derived from {@link DomainGovernance}
      * @param wirePointerToAttributeIdMap JSON Pointer ({@code "/fieldName"}) to canonical {@code attributeId} map for {@code WriteIntent} extraction
+     * @param derivedMasks masks automatically derived from sensitive/PII/financial {@link DomainGovernance} annotations
+     * @param declaredMasks explicit masks declared via {@link AuthzMask}
      */
     public record IntrospectedDtoGovernanceContract(
             String resourceKey,
@@ -76,7 +111,9 @@ public final class MetadataDtoGovernanceIntrospector {
             Set<String> nonExportableFieldNames,
             Set<String> aiContextDeniedAttributeIds,
             List<FieldUseEffectDirective> baselineFieldUseDirectives,
-            Map<String, String> wirePointerToAttributeIdMap
+            Map<String, String> wirePointerToAttributeIdMap,
+            List<MaskContributionSpec> derivedMasks,
+            List<DeclaredMaskSpec> declaredMasks
     ) {
         /** Validates non-null components and wraps collections immutably. */
         public IntrospectedDtoGovernanceContract {
@@ -87,6 +124,61 @@ public final class MetadataDtoGovernanceIntrospector {
             aiContextDeniedAttributeIds = Set.copyOf(Objects.requireNonNull(aiContextDeniedAttributeIds, "aiContextDeniedAttributeIds is required"));
             baselineFieldUseDirectives = List.copyOf(Objects.requireNonNull(baselineFieldUseDirectives, "baselineFieldUseDirectives is required"));
             wirePointerToAttributeIdMap = Map.copyOf(Objects.requireNonNull(wirePointerToAttributeIdMap, "wirePointerToAttributeIdMap is required"));
+            derivedMasks = derivedMasks == null ? List.of() : List.copyOf(derivedMasks);
+            declaredMasks = declaredMasks == null ? List.of() : List.copyOf(declaredMasks);
+        }
+
+        /** Backward-compatible 7-argument constructor without explicit or derived mask metadata. */
+        public IntrospectedDtoGovernanceContract(
+                String resourceKey,
+                Class<?> dtoType,
+                List<DtoFieldSchemaMetadata> fieldSchemas,
+                Set<String> nonExportableFieldNames,
+                Set<String> aiContextDeniedAttributeIds,
+                List<FieldUseEffectDirective> baselineFieldUseDirectives,
+                Map<String, String> wirePointerToAttributeIdMap
+        ) {
+            this(
+                    resourceKey,
+                    dtoType,
+                    fieldSchemas,
+                    nonExportableFieldNames,
+                    aiContextDeniedAttributeIds,
+                    baselineFieldUseDirectives,
+                    wirePointerToAttributeIdMap,
+                    List.of(),
+                    List.of()
+            );
+        }
+
+        /**
+         * Returns the effective mask contributions combining explicit {@link AuthzMask}
+         * declarations (which take precedence per {@code attributeId}) and auto-derived
+         * {@link DomainGovernance} masks.
+         */
+        public List<MaskContributionSpec> effectiveMaskDirectives() {
+            if (declaredMasks.isEmpty() && derivedMasks.isEmpty()) {
+                return List.of();
+            }
+            Set<String> overriddenAttrIds = new LinkedHashSet<>();
+            List<MaskContributionSpec> result = new ArrayList<>();
+            for (DeclaredMaskSpec declared : declaredMasks) {
+                MaskContributionSpec contrib = declared.contribution();
+                result.add(contrib);
+                if (contrib.fieldSelector() != null && contrib.fieldSelector().attributeIds() != null) {
+                    overriddenAttrIds.addAll(contrib.fieldSelector().attributeIds());
+                }
+            }
+            for (MaskContributionSpec derived : derivedMasks) {
+                Set<String> attrs = derived.fieldSelector() != null
+                        ? derived.fieldSelector().attributeIds()
+                        : Set.of();
+                boolean overridden = !attrs.isEmpty() && attrs.stream().allMatch(overriddenAttrIds::contains);
+                if (!overridden) {
+                    result.add(derived);
+                }
+            }
+            return List.copyOf(result);
         }
     }
 
@@ -165,11 +257,14 @@ public final class MetadataDtoGovernanceIntrospector {
         Set<String> aiContextDenied = new LinkedHashSet<>();
         List<FieldUseEffectDirective> baselineDirectives = new ArrayList<>();
         Map<String, String> wirePointers = new LinkedHashMap<>();
+        List<MaskContributionSpec> derivedMasks = new ArrayList<>();
+        List<DeclaredMaskSpec> declaredMasks = new ArrayList<>();
         if (fallbackContract != null) {
             wirePointers.putAll(fallbackContract.wirePointerToAttributeIdMap());
         }
 
         ObjectNode ownerTypeGovernance = DomainLineageResolver.resolveTypeGovernance(dtoType);
+        collectTypeLevelAuthzMasks(dtoType, declaredMasks);
 
         for (PropertyDescriptor prop : collectProperties(dtoType)) {
             processProperty(
@@ -183,7 +278,9 @@ public final class MetadataDtoGovernanceIntrospector {
                     nonExportable,
                     aiContextDenied,
                     baselineDirectives,
-                    wirePointers
+                    wirePointers,
+                    derivedMasks,
+                    declaredMasks
             );
         }
 
@@ -194,7 +291,9 @@ public final class MetadataDtoGovernanceIntrospector {
                 nonExportable,
                 aiContextDenied,
                 baselineDirectives,
-                wirePointers
+                wirePointers,
+                derivedMasks,
+                declaredMasks
         );
     }
 
@@ -251,6 +350,10 @@ public final class MetadataDtoGovernanceIntrospector {
                     boolean hasGovOrSchema = ResolverUtils.getAnnotation(DomainLineage.class, m.getAnnotations()) != null
                             || ResolverUtils.getAnnotation(DomainGovernance.class, m.getAnnotations()) != null
                             || ResolverUtils.getAnnotation(Schema.class, m.getAnnotations()) != null
+                            || ResolverUtils.getAnnotation(AuthzMask.class, m.getAnnotations()) != null
+                            || ResolverUtils.getAnnotation(AuthzMasks.class, m.getAnnotations()) != null
+                            || ResolverUtils.getAnnotation(AuthzScopeAnchor.class, m.getAnnotations()) != null
+                            || ResolverUtils.getAnnotation(AuthzCustodyPartition.class, m.getAnnotations()) != null
                             || ResolverUtils.getAnnotation(NotNull.class, m.getAnnotations()) != null
                             || ResolverUtils.getAnnotation(NotBlank.class, m.getAnnotations()) != null
                             || ResolverUtils.getAnnotation(NotEmpty.class, m.getAnnotations()) != null;
@@ -276,6 +379,10 @@ public final class MetadataDtoGovernanceIntrospector {
                 boolean hasGovOrSchema = ResolverUtils.getAnnotation(DomainLineage.class, m.getAnnotations()) != null
                         || ResolverUtils.getAnnotation(DomainGovernance.class, m.getAnnotations()) != null
                         || ResolverUtils.getAnnotation(Schema.class, m.getAnnotations()) != null
+                        || ResolverUtils.getAnnotation(AuthzMask.class, m.getAnnotations()) != null
+                        || ResolverUtils.getAnnotation(AuthzMasks.class, m.getAnnotations()) != null
+                        || ResolverUtils.getAnnotation(AuthzScopeAnchor.class, m.getAnnotations()) != null
+                        || ResolverUtils.getAnnotation(AuthzCustodyPartition.class, m.getAnnotations()) != null
                         || ResolverUtils.getAnnotation(NotNull.class, m.getAnnotations()) != null
                         || ResolverUtils.getAnnotation(NotBlank.class, m.getAnnotations()) != null
                         || ResolverUtils.getAnnotation(NotEmpty.class, m.getAnnotations()) != null;
@@ -321,7 +428,9 @@ public final class MetadataDtoGovernanceIntrospector {
             Set<String> nonExportable,
             Set<String> aiContextDenied,
             List<FieldUseEffectDirective> baselineDirectives,
-            Map<String, String> wirePointers
+            Map<String, String> wirePointers,
+            List<MaskContributionSpec> derivedMasks,
+            List<DeclaredMaskSpec> declaredMasks
     ) {
         DomainLineage lineage = findAnnotation(elements, DomainLineage.class);
         DomainGovernance governance = findAnnotation(elements, DomainGovernance.class);
@@ -363,6 +472,8 @@ public final class MetadataDtoGovernanceIntrospector {
         fieldSchemas.add(new DtoFieldSchemaMetadata(wireFieldName, attributeId, valueType, nullable));
         wirePointers.put("/" + wireFieldName, attributeId);
 
+        boolean hasExplicitMemberMask = collectMemberAuthzMasks(elements, attributeId, declaredMasks);
+
         if (effectiveGovNode != null) {
             boolean exportable = effectiveGovNode.path("exportable").asBoolean(true);
             if (!exportable) {
@@ -374,7 +485,9 @@ public final class MetadataDtoGovernanceIntrospector {
             String effectiveCategory = effectiveGovNode.path("dataCategory").asText("");
             String effectiveAiVisibility = effectiveGovNode.path("aiUsage").path("visibility").asText("");
 
-            if ("credential".equals(effectiveCategory) || "secret".equals(effectiveClassification)) {
+            boolean isSecretOrCredential = "credential".equals(effectiveCategory)
+                    || "secret".equals(effectiveClassification);
+            if (isSecretOrCredential) {
                 baselineDirectives.add(new FieldUseEffectDirective(
                         attributeId, FieldUseCategory.VALUE, RuleEffect.DENY));
             }
@@ -392,6 +505,19 @@ public final class MetadataDtoGovernanceIntrospector {
                         attributeId, FieldUseCategory.AGGREGATE, RuleEffect.DENY));
                 baselineDirectives.add(new FieldUseEffectDirective(
                         attributeId, FieldUseCategory.JOIN, RuleEffect.DENY));
+            }
+
+            if (!hasExplicitMemberMask && !isSecretOrCredential && ("sensitive_personal".equals(effectiveCategory)
+                    || "restricted".equals(effectiveClassification)
+                    || "confidential".equals(effectiveClassification))) {
+                MaskContributionSpec derivedMask = deriveDefaultMaskForGovernance(
+                        attributeId, javaType, valueType, nullable);
+                if (derivedMask != null) {
+                    derivedMasks.add(derivedMask);
+                } else {
+                    baselineDirectives.add(new FieldUseEffectDirective(
+                            attributeId, FieldUseCategory.VALUE, RuleEffect.DENY));
+                }
             }
 
             if ("deny".equals(effectiveAiVisibility)) {
@@ -713,6 +839,130 @@ public final class MetadataDtoGovernanceIntrospector {
             }
         }
         return Set.copyOf(allowed);
+    }
+
+    private static MaskContributionSpec deriveDefaultMaskForGovernance(
+            String attributeId,
+            Class<?> javaType,
+            FactValueType valueType,
+            boolean nullable
+    ) {
+        if (valueType == FactValueType.STRING) {
+            return new MaskContributionSpec(
+                    PolicyFieldSelector.exact(Set.of(attributeId)),
+                    "REDACT_CONSTANT",
+                    Map.of("replacement", "***")
+            );
+        }
+        if ((javaType == null || !javaType.isPrimitive()) && nullable) {
+            return new MaskContributionSpec(
+                    PolicyFieldSelector.exact(Set.of(attributeId)),
+                    "NULLIFY",
+                    Map.of()
+            );
+        }
+        // Primitive and non-nullable non-String fields cannot satisfy MaskStrategy.requiresNullableTargetField;
+        // fail closed via FieldUseCategory.VALUE + RuleEffect.DENY (OMIT_BY_FIELD_USE_DENY).
+        return null;
+    }
+
+    private static void collectTypeLevelAuthzMasks(
+            Class<?> dtoType,
+            List<DeclaredMaskSpec> target
+    ) {
+        for (AuthzMask mask : AnnotatedElementUtils.findMergedRepeatableAnnotations(dtoType, AuthzMask.class)) {
+            if (mask.attributeId() != null && !mask.attributeId().isBlank()) {
+                target.add(toDeclaredMaskSpec(mask, mask.attributeId().trim()));
+            }
+        }
+    }
+
+    private static boolean collectMemberAuthzMasks(
+            List<AnnotatedElement> elements,
+            String resolvedAttributeId,
+            List<DeclaredMaskSpec> target
+    ) {
+        if (elements == null) {
+            return false;
+        }
+        boolean found = false;
+        Set<String> seenKeys = new LinkedHashSet<>();
+        for (AnnotatedElement el : elements) {
+            if (el == null) {
+                continue;
+            }
+            for (AuthzMask mask : AnnotatedElementUtils.findMergedRepeatableAnnotations(el, AuthzMask.class)) {
+                String attrId = (mask.attributeId() != null && !mask.attributeId().isBlank())
+                        ? mask.attributeId().trim()
+                        : resolvedAttributeId;
+                DeclaredMaskSpec spec = toDeclaredMaskSpec(mask, attrId);
+                String dedupKey = attrId + "|" + spec.contribution().strategyId() + "|" + spec.surfaces() + "|" + spec.modes();
+                if (seenKeys.add(dedupKey)) {
+                    target.add(spec);
+                    found = true;
+                }
+            }
+        }
+        return found;
+    }
+
+    /** Translates an {@link AuthzMask} annotation into a {@link DeclaredMaskSpec}. */
+    public static DeclaredMaskSpec toDeclaredMaskSpec(AuthzMask mask, String attributeId) {
+        Objects.requireNonNull(mask, "mask is required");
+        String targetAttr = Objects.requireNonNull(attributeId, "attributeId is required").trim();
+        if (targetAttr.isEmpty()) {
+            throw new IllegalArgumentException("attributeId is required for @AuthzMask");
+        }
+        String strategyId = mask.strategy() == AuthzMaskStrategy.CUSTOM
+                ? mask.customStrategyId().trim()
+                : mask.strategy().strategyId();
+        if (strategyId.isEmpty()) {
+            throw new IllegalArgumentException("@AuthzMask with CUSTOM strategy requires non-blank customStrategyId");
+        }
+        Map<String, Object> params = new LinkedHashMap<>();
+        switch (mask.strategy()) {
+            case REDACT_CONSTANT -> params.put("replacement", mask.replacement() != null ? mask.replacement() : "***");
+            case PARTIAL_MASK -> {
+                params.put("visiblePrefix", mask.visiblePrefix());
+                params.put("visibleSuffix", mask.visibleSuffix());
+                params.put("maskChar", mask.maskChar() != null && !mask.maskChar().isEmpty() ? mask.maskChar() : "*");
+            }
+            case HASH_TOKEN_KEYED -> {
+                if (mask.keyAlias() != null && !mask.keyAlias().isBlank()) {
+                    params.put("keyAlias", mask.keyAlias().trim());
+                }
+                params.put("truncateChars", mask.truncateChars());
+            }
+            case SUMMARY_ONLY -> {
+                if (mask.summaryFormat() != null && !mask.summaryFormat().isBlank()) {
+                    params.put("summaryFormat", mask.summaryFormat());
+                }
+            }
+            default -> {
+                // OMIT, NULLIFY, CPF_CNPJ_PARTIAL, CUSTOM need no default parameters
+            }
+        }
+        Set<EvaluationMode> modes = mask.modes() == null || mask.modes().length == 0
+                ? Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET)
+                : Set.of(mask.modes());
+        Set<String> surfaces = new LinkedHashSet<>();
+        if (mask.surfaces() != null) {
+            for (String s : mask.surfaces()) {
+                if (s != null && !s.isBlank()) {
+                    surfaces.add(s.trim());
+                }
+            }
+        }
+        return new DeclaredMaskSpec(
+                new MaskContributionSpec(
+                        PolicyFieldSelector.exact(Set.of(targetAttr)),
+                        strategyId,
+                        Map.copyOf(params)
+                ),
+                modes,
+                surfaces,
+                mask.reason() != null ? mask.reason().trim() : ""
+        );
     }
 
     private static <A extends Annotation> A findAnnotation(

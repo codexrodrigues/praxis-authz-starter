@@ -53,7 +53,7 @@ import org.praxisplatform.authz.outbox.JdbcAuditOutboxRelayExecutor.RelayBatchRe
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox.OutboxDeliveryStatus;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox.PersistedOutboxRecord;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.praxisplatform.authz.seams.DeclarativeDecisionPointExecutionTemplate;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.WorkerDelegationToken;
@@ -165,7 +165,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
 
     @Test
     void verifyP8DeclarativeDecisionPointExecutionTemplateAndFailClosedRegistry() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
         RuntimeDecisionPointRegistry registry = new RuntimeDecisionPointRegistry(
                 blueprint.admissionRecords(),
                 blueprint.coordinates()
@@ -175,7 +175,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
         registry.registerAdmissionRecord(
                 admissionRecord,
                 blueprint.dualScopeSpec(),
-                Set.of("ergon.afastamentos.lotacao_setor_id")
+                Set.of("workforce.leaves.lotacao_setor_id")
         );
 
         // P8-R02: Admission record with proxyEnforcedWithoutSelfInvocationBypass == false is rejected fail-closed (P41)
@@ -213,7 +213,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                 List.of(new QueryAdapterFieldBinding(
                         blueprint.resourceKey(),
                         "resource.lotacaoSetorId",
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "e.lotacaoSetorId",
                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                         false
@@ -223,7 +223,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
         // 1. Unregistered decisionPointKey fails closed immediately (P20, P34, P41)
         assertThrows(SecurityException.class, () ->
                 template.authorizeSearchByPointKey(
-                        "resource-operation/praxis-ergon-showcase/unregistered.resource/read",
+                        "resource-operation/praxis-workforce-showcase/unregistered.resource/read",
                         Set.of(),
                         Map.of("subject.principalId", "usr-gestor-101"),
                         Map.of("subject.principalId", FactResolutionStatus.PRESENT),
@@ -253,8 +253,8 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
 
         // 3. Registered pointKey enforces mandatory scope anchor protection and dual-scope custody on mutation
         Map<String, String> wireMap = Map.of(
-                "/lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id",
-                "/substitutoServidorId", "ergon.afastamentos.substituto_servidor_id"
+                "/lotacaoSetorId", "workforce.leaves.lotacao_setor_id",
+                "/substitutoServidorId", "workforce.leaves.substituto_servidor_id"
         );
         assertThrows(SecurityException.class, () ->
                 template.authorizeMutationByPointKey(
@@ -287,7 +287,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                 true,
                 BatchAuthorizationMode.REJECT_ALL,
                 TransactionCardinality.STATEMENT_ATOMIC,
-                List.of(new WriteFieldChange("/substitutoServidorId", "ergon.afastamentos.substituto_servidor_id", WriteChangeKind.SET, 7777))
+                List.of(new WriteFieldChange("/substitutoServidorId", "workforce.leaves.substituto_servidor_id", WriteChangeKind.SET, 7777))
         );
         var workerEnvelope = template.authorizeBulkWorkerItemByPointKey(
                 pointKey,
@@ -304,7 +304,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
 
     @Test
     void verifyP8GovernedPapAdminOperationsOptInAndAuthorityGuards() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         // 1. By default (admin-endpoints.enabled=false), GovernedPapAdminOperationsService is NOT registered (G0, P32)
         contextRunner
@@ -327,8 +327,8 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                             adminService.querySemanticCatalog(new PapCatalogQueryRequest(
                                     "usr-no-auth",
                                     Set.of(),
-                                    Set.of("praxis-ergon-showcase"),
-                                    "praxis-ergon-showcase"
+                                    Set.of("praxis-workforce-showcase"),
+                                    "praxis-workforce-showcase"
                             ))
                     );
 
@@ -336,8 +336,8 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                     var catalogView = adminService.querySemanticCatalog(new PapCatalogQueryRequest(
                             "usr-pap-admin",
                             Set.of("praxis:authz:pap:catalog:read"),
-                            Set.of("praxis-ergon-showcase"),
-                            "praxis-ergon-showcase"
+                            Set.of("praxis-workforce-showcase"),
+                            "praxis-workforce-showcase"
                     ));
                     assertEquals(1, catalogView.admittedDecisionPoints().size());
 
@@ -372,7 +372,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                     );
                     ConfigRuleMaterializationSnapshot snapshot = new ConfigRuleMaterializationSnapshot(
                             "mat-p8-1", "def-p8-1", 1, "tenant-gov-br", "prod",
-                            "policy_engine", "opa-policy", "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                            "policy_engine", "opa-policy", "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                             "rel-p8-1", "applied", true, expectedFp,
                             "usr-author-1", "usr-approver-2", "usr-operator-1",
                             MaterializationResolutionState.ELIGIBLE_APPLIED_HEAD,
@@ -420,7 +420,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                             adminService.findActiveRuntimeHead(
                                     "tenant-gov-br",
                                     "prod",
-                                    "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                                    "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                                     "usr-no-auth",
                                     Set.of(),
                                     Set.of("tenant-gov-br")
@@ -429,7 +429,7 @@ class P8OutboxRelayAndDeclarativeRegistryTest {
                     assertTrue(adminService.findActiveRuntimeHead(
                             "tenant-gov-br",
                             "prod",
-                            "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                            "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                             "usr-operator-1",
                             Set.of(GovernedOpaReleaseCoordinator.REQUIRED_ADMIN_AUTHORITY),
                             Set.of("tenant-gov-br")

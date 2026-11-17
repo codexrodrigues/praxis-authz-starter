@@ -51,9 +51,9 @@ import org.praxisplatform.authz.opa.governance.GovernedOpaReleaseCoordinator;
 import org.praxisplatform.authz.opa.governance.PolicyCandidateVerificationCorpusCase;
 import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
-import org.praxisplatform.authz.pilot.AfastamentoPilotRuntimeHost;
-import org.praxisplatform.authz.pilot.AfastamentoPilotRuntimeHost.AfastamentoRecord;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeavePilotRuntimeHost;
+import org.praxisplatform.authz.pilot.WorkforceLeavePilotRuntimeHost.WorkforceLeaveRecord;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.AdvisoryOperationAvailability;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.AuthorizedPreMutationContext;
@@ -102,7 +102,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
 
         // 1. Outside an active transaction, BEFORE_COMMIT_OUTBOX fails closed and marks obligation unfulfilled (P19)
         var outsideTxResults = barrierCoordinator.fulfillAtBarrier(
-                "resource-operation:praxis-ergon-showcase:human-resources.afastamentos:filter",
+                "resource-operation:praxis-workforce-showcase:human-resources.afastamentos:filter",
                 "rev-2026-11-09-01",
                 EnforcementDisposition.PERMIT,
                 ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
@@ -116,7 +116,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         // 2. Inside an active transaction that commits, the outbox record is durably persisted
         var committedResults = txTemplate.execute(status ->
                 barrierCoordinator.fulfillAtBarrier(
-                        "resource-operation:praxis-ergon-showcase:human-resources.afastamentos:filter",
+                        "resource-operation:praxis-workforce-showcase:human-resources.afastamentos:filter",
                         "rev-2026-11-09-01",
                         EnforcementDisposition.PERMIT,
                         ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
@@ -139,7 +139,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         assertThrows(RuntimeException.class, () ->
                 txTemplate.execute(status -> {
                     var res = barrierCoordinator.fulfillAtBarrier(
-                            "resource-operation:praxis-ergon-showcase:human-resources.afastamentos:filter",
+                            "resource-operation:praxis-workforce-showcase:human-resources.afastamentos:filter",
                             "rev-2026-11-09-01",
                             EnforcementDisposition.PERMIT,
                             ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
@@ -158,7 +158,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         readOnlyTxTemplate.setReadOnly(true);
         var readOnlyResults = readOnlyTxTemplate.execute(status ->
                 barrierCoordinator.fulfillAtBarrier(
-                        "resource-operation:praxis-ergon-showcase:human-resources.afastamentos:filter",
+                        "resource-operation:praxis-workforce-showcase:human-resources.afastamentos:filter",
                         "rev-2026-11-09-01",
                         EnforcementDisposition.PERMIT,
                         ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
@@ -197,7 +197,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
 
     @Test
     void verifyP6ConfigMaterializationToOpaReconcilerLifecycleAndWithdrawal() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
         RegoV1PolicyCompiler compiler = new RegoV1PolicyCompiler();
         ConfigMaterializationToOpaReconciler reconciler = new ConfigMaterializationToOpaReconciler(
                 compiler,
@@ -248,7 +248,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         // 1. Self-approval (authoredBy == approvedBy) violates 4-eyes governance and fails closed (P28, P55)
         ConfigRuleMaterializationSnapshot selfApprovedSnapshot = new ConfigRuleMaterializationSnapshot(
                 "mat-101", "def-101", 1, "tenant-gov-br", "prod",
-                "policy_engine", "opa-policy", "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                "policy_engine", "opa-policy", "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                 "rel-config-101", "applied", true, expectedFp,
                 "usr-author-1", "usr-author-1", "usr-operator-1",
                 MaterializationResolutionState.ELIGIBLE_APPLIED_HEAD,
@@ -267,7 +267,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         // 2. Valid 4-eyes ELIGIBLE_APPLIED_HEAD activates bundle and pins OpaRuntimeHead (P53, P55, P63)
         ConfigRuleMaterializationSnapshot validSnapshot = new ConfigRuleMaterializationSnapshot(
                 "mat-102", "def-101", 2, "tenant-gov-br", "prod",
-                "policy_engine", "opa-policy", "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                "policy_engine", "opa-policy", "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                 "rel-config-102", "applied", true, expectedFp,
                 "usr-author-1", "usr-approver-2", "usr-operator-1",
                 MaterializationResolutionState.ELIGIBLE_APPLIED_HEAD,
@@ -287,7 +287,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         // 2b. Replay/rollback of older definitionVersion (1 < 2) is rejected fail-closed (P67-R02 / P17 / P28)
         ConfigRuleMaterializationSnapshot rollbackSnapshot = new ConfigRuleMaterializationSnapshot(
                 "mat-101-replay", "def-101", 1, "tenant-gov-br", "prod",
-                "policy_engine", "opa-policy", "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                "policy_engine", "opa-policy", "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                 "rel-config-101-replay", "applied", true, expectedFp,
                 "usr-author-1", "usr-approver-2", "usr-operator-1",
                 MaterializationResolutionState.ELIGIBLE_APPLIED_HEAD,
@@ -325,7 +325,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
         // 3. Subsequent withdrawal (PREVIOUSLY_APPLIED_WITHOUT_ELIGIBLE_HEAD) revokes the active head (P18, P28, P55)
         ConfigRuleMaterializationSnapshot withdrawnSnapshot = new ConfigRuleMaterializationSnapshot(
                 "mat-102", "def-101", 2, "tenant-gov-br", "prod",
-                "policy_engine", "opa-policy", "unit:pol-praxis-ergon-showcase-human-resources-afastamentos:v1",
+                "policy_engine", "opa-policy", "unit:pol-praxis-workforce-showcase-human-resources-afastamentos:v1",
                 "rel-config-102", "superseded", true, expectedFp,
                 "usr-author-1", "usr-approver-2", "usr-operator-1",
                 MaterializationResolutionState.PREVIOUSLY_APPLIED_WITHOUT_ELIGIBLE_HEAD,
@@ -345,7 +345,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
 
     @Test
     void verifyP7MetadataResourceAuthorizationSeamEndToEnd() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:h2:mem:praxis_seam_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
                 "sa",
@@ -378,7 +378,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
                 List.of(new QueryAdapterFieldBinding(
                         blueprint.resourceKey(),
                         "resource.lotacaoSetorId",
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "e.lotacaoSetorId",
                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                         false
@@ -410,7 +410,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
                 Map.of("subject.principalId", "usr-gestor-101", "subject.organizationUnitIds", List.of(100L, 200L)),
                 Map.of("subject.principalId", FactResolutionStatus.PRESENT, "subject.organizationUnitIds", FactResolutionStatus.PRESENT),
                 Map.of(),
-                List.of(new FieldUseEffectDirective("ergon.afastamentos.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
+                List.of(new FieldUseEffectDirective("workforce.leaves.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
                 jpaAdapter,
                 "e.tenantId = :hardTenantId",
                 Map.of("hardTenantId", "tenant-gov-br"),
@@ -422,8 +422,8 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
 
         List<DetachedDtoMaskingResult> maskedRows = seam.projectAndMaskQueryResults(
                 queryCtx,
-                List.of(new AfastamentoRecord(10L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 5001L, "M54.5")),
-                AfastamentoPilotRuntimeHost.defaultFieldSchemas()
+                List.of(new WorkforceLeaveRecord(10L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 5001L, "M54.5")),
+                WorkforceLeavePilotRuntimeHost.defaultFieldSchemas()
         );
         assertEquals(1, maskedRows.size());
         assertEquals("***CID-RESTRITO***", maskedRows.getFirst().detachedProjection().get("cidCodigo"));
@@ -436,8 +436,8 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
                         Set.of("Accept"),
                         Map.of("subject.principalId", "usr-gestor-101", "subject.organizationUnitIds", List.of(100L)),
                         Map.of("subject.principalId", FactResolutionStatus.PRESENT, "subject.organizationUnitIds", FactResolutionStatus.PRESENT),
-                        Map.of(FieldUseCategory.FILTER, Set.of("ergon.afastamentos.cid_codigo")),
-                        List.of(new FieldUseEffectDirective("ergon.afastamentos.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
+                        Map.of(FieldUseCategory.FILTER, Set.of("workforce.leaves.cid_codigo")),
+                        List.of(new FieldUseEffectDirective("workforce.leaves.cid_codigo", FieldUseCategory.FILTER, RuleEffect.DENY)),
                         jpaAdapter,
                         "e.tenantId = :hardTenantId",
                         Map.of("hardTenantId", "tenant-gov-br"),
@@ -447,10 +447,10 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
 
         // 4. Pre-Hydration Mutation Seam + JDBC Outbox Commit + Detached Masking (P13, P14, P19, P40)
         Map<String, String> wireMap = Map.of(
-                "/lotacaoSetorId", "ergon.afastamentos.lotacao_setor_id",
-                "/statusAfastamento", "ergon.afastamentos.status_afastamento",
-                "/substitutoServidorId", "ergon.afastamentos.substituto_servidor_id",
-                "/cidCodigo", "ergon.afastamentos.cid_codigo"
+                "/lotacaoSetorId", "workforce.leaves.lotacao_setor_id",
+                "/statusAfastamento", "workforce.leaves.status_afastamento",
+                "/substitutoServidorId", "workforce.leaves.substituto_servidor_id",
+                "/cidCodigo", "workforce.leaves.cid_codigo"
         );
         // Clearing a mandatory scope anchor (lotacaoSetorId: null) is rejected fail-closed (P67-R04 / CC06 / P13)
         assertThrows(SecurityException.class, () ->
@@ -462,7 +462,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
                         "{\"lotacaoSetorId\": null, \"substitutoServidorId\": 7777}",
                         wireMap,
                         Set.of("/version"),
-                        Set.of("ergon.afastamentos.lotacao_setor_id"),
+                        Set.of("workforce.leaves.lotacao_setor_id"),
                         blueprint.dualScopeSpec(),
                         false,
                         true,
@@ -506,13 +506,13 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
                     Map.of("subject.principalId", "usr-gestor-101", "subject.organizationUnitIds", List.of(100L), "resource.lotacaoSetorId", 100L),
                     Map.of("subject.principalId", FactResolutionStatus.PRESENT, "subject.organizationUnitIds", FactResolutionStatus.PRESENT, "resource.lotacaoSetorId", FactResolutionStatus.PRESENT)
             );
-            AfastamentoRecord updatedEntity = new AfastamentoRecord(
+            WorkforceLeaveRecord updatedEntity = new WorkforceLeaveRecord(
                     10L, "tenant-gov-br", 1L, 2L, 100L, "DEFERIDO", 7777L, "M54.5"
             );
             return seam.completePostMutationAndMask(
                     preCtx,
                     updatedEntity,
-                    AfastamentoPilotRuntimeHost.defaultFieldSchemas()
+                    WorkforceLeavePilotRuntimeHost.defaultFieldSchemas()
             );
         });
         assertNotNull(mutationResult);
@@ -538,7 +538,7 @@ class P6AndP7ControlPlaneOutboxAndMetadataSeamsTest {
                 true,
                 BatchAuthorizationMode.REJECT_ALL,
                 TransactionCardinality.STATEMENT_ATOMIC,
-                List.of(new WriteFieldChange("/substitutoServidorId", "ergon.afastamentos.substituto_servidor_id", WriteChangeKind.SET, 7777))
+                List.of(new WriteFieldChange("/substitutoServidorId", "workforce.leaves.substituto_servidor_id", WriteChangeKind.SET, 7777))
         );
         var workerItemEnvelope = seam.authorizeBulkDurableWorkerItem(
                 validToken,

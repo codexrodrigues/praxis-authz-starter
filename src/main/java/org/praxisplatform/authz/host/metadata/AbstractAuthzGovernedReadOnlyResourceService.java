@@ -234,7 +234,7 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
     /** Returns the mandatory host-level {@link ResourceFilterAccessScope} (tenant/org hard scope). */
     protected ResourceFilterAccessScope<E> resolveHardScope() {
         if (governanceSpec != null && callerContextProvider != null) {
-            return governanceSpec.buildHardScope(callerContextProvider.currentCallerContext().tenantId());
+            return governanceSpec.buildHardScope(callerContextProvider.currentCallerContext());
         }
         throw new IllegalStateException(
                 "Override resolveHardScope() or supply an AuthzResourceGovernanceSpec + AuthzCallerContextProvider");
@@ -243,6 +243,9 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
     /** Returns the mandatory host-level JPQL hard-scope clause (e.g. {@code "e.tenantId = :__praxis_hard_tenant_id"}). */
     protected String resolveHardScopeJpql() {
         if (governanceSpec != null) {
+            if (callerContextProvider != null) {
+                return governanceSpec.buildHardScopeJpql(callerContextProvider.currentCallerContext());
+            }
             return governanceSpec.buildHardScopeJpql();
         }
         throw new IllegalStateException(
@@ -252,7 +255,7 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
     /** Returns the mandatory host-level JPQL hard-scope parameters. */
     protected Map<String, Object> resolveHardScopeParams() {
         if (governanceSpec != null && callerContextProvider != null) {
-            return governanceSpec.buildHardScopeParams(callerContextProvider.currentCallerContext().tenantId());
+            return governanceSpec.buildHardScopeParams(callerContextProvider.currentCallerContext());
         }
         throw new IllegalStateException(
                 "Override resolveHardScopeParams() or supply an AuthzResourceGovernanceSpec + AuthzCallerContextProvider");
@@ -456,35 +459,34 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 governanceSpec.operationModifiedAttributes(),
                 () -> {
                     AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-                    boolean collectionCedente = callerCtx.callerMatchesCedente() != null
-                            ? callerCtx.callerMatchesCedente()
-                            : governanceSpec.isCallerCedente(null, callerCtx);
-                    boolean collectionCessionario = callerCtx.callerMatchesCessionario() != null
-                            ? callerCtx.callerMatchesCessionario()
-                            : governanceSpec.isCallerCessionario(null, callerCtx);
-                    return new AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext(
-                            callerCtx.subjectAndEnvironmentFacts(),
-                            callerCtx.factStatuses(),
-                            collectionCedente,
-                            collectionCessionario,
-                            callerCtx.tenantId()
+                    boolean collectionOrigin = callerCtx.callerMatchesOrigin() != null
+                            ? callerCtx.callerMatchesOrigin()
+                            : governanceSpec.isCallerOrigin(null, callerCtx);
+                    boolean collectionDestination = callerCtx.callerMatchesDestination() != null
+                            ? callerCtx.callerMatchesDestination()
+                            : governanceSpec.isCallerDestination(null, callerCtx);
+                    return AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext.fromGovernanceSpec(
+                            governanceSpec,
+                            callerCtx,
+                            collectionOrigin,
+                            collectionDestination
                     );
                 },
                 governanceSpec::extractSnapshotTargetFacts,
                 this::resolveItemSnapshotForAvailability,
                 (callerAvailabilityCtx, snapshot) -> {
                     AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-                    if (callerCtx.callerMatchesCedente() != null) {
-                        return callerCtx.callerMatchesCedente();
+                    if (callerCtx.callerMatchesOrigin() != null) {
+                        return callerCtx.callerMatchesOrigin();
                     }
-                    return governanceSpec.isCallerCedenteForSnapshot(snapshot, callerCtx);
+                    return governanceSpec.isCallerOriginForSnapshot(snapshot, callerCtx);
                 },
                 (callerAvailabilityCtx, snapshot) -> {
                     AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-                    if (callerCtx.callerMatchesCessionario() != null) {
-                        return callerCtx.callerMatchesCessionario();
+                    if (callerCtx.callerMatchesDestination() != null) {
+                        return callerCtx.callerMatchesDestination();
                     }
-                    return governanceSpec.isCallerCessionarioForSnapshot(snapshot, callerCtx);
+                    return governanceSpec.isCallerDestinationForSnapshot(snapshot, callerCtx);
                 },
                 governanceSpec.actionDecisionPoints(),
                 governanceSpec.surfaceDecisionPoints()

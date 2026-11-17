@@ -33,6 +33,7 @@ public class PraxisAuthzProperties {
     private final AdminEndpoints adminEndpoints = new AdminEndpoints();
     private final Telemetry telemetry = new Telemetry();
     private final ReadinessGate readinessGate = new ReadinessGate();
+    private final Interceptor interceptor = new Interceptor();
 
     public boolean isEnabled() {
         return enabled;
@@ -99,6 +100,10 @@ public class PraxisAuthzProperties {
 
     public ReadinessGate getReadinessGate() {
         return readinessGate;
+    }
+
+    public Interceptor getInterceptor() {
+        return interceptor;
     }
 
     /** OPA client and revision-guard configuration. */
@@ -212,7 +217,7 @@ public class PraxisAuthzProperties {
     /** JDBC session context and Row-Level Security (RLS) role isolation settings (P27, P33). */
     public static class Jdbc {
         /** Non-superuser, non-BYPASSRLS database roles admitted for transactional RLS session binding. */
-        private Set<String> admittedDbRoles = Set.of("praxis_app_rls_user", "ergon_app_rls_user");
+        private Set<String> admittedDbRoles = Set.of("praxis_app_rls_user");
 
         public Set<String> getAdmittedDbRoles() {
             return admittedDbRoles;
@@ -353,6 +358,20 @@ public class PraxisAuthzProperties {
 
         public void setFailOnWarning(boolean failOnWarning) {
             this.failOnWarning = failOnWarning;
+        }
+    }
+
+    /** Automatic {@code ResourceGovernanceInterceptor} configuration for plain Praxis services ({@code Wave 1.4B}). */
+    public static class Interceptor {
+        /** Whether to fail closed when a plain service has neither {@code AuthzResourceGovernanceSpec} nor {@code @AuthzTenantScope}. */
+        private boolean failClosedOnUnconfiguredServices = false;
+
+        public boolean isFailClosedOnUnconfiguredServices() {
+            return failClosedOnUnconfiguredServices;
+        }
+
+        public void setFailClosedOnUnconfiguredServices(boolean failClosedOnUnconfiguredServices) {
+            this.failClosedOnUnconfiguredServices = failClosedOnUnconfiguredServices;
         }
     }
 }

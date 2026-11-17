@@ -15,7 +15,7 @@ import org.praxisplatform.authz.catalog.PapCatalogQueryRequest;
 import org.praxisplatform.authz.catalog.PapCatalogViewResponse;
 import org.praxisplatform.authz.catalog.SemanticDecisionPointCatalogService;
 import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 
 /**
  * Conformance tests for {@link SemanticDecisionPointCatalogService} ({@code P34}, {@code P35},
@@ -27,14 +27,14 @@ class SemanticDecisionPointCatalogServiceTest {
     @Test
     void p34_p35_p41_p43_p44_p45_p54_p57_p58_p62_p64_catalogEnforcesScopeProxyLineageAndCycleBudgets() {
         PraxisAuthzProperties props = new PraxisAuthzProperties();
-        AfastamentoAuthzPilotBlueprint validBlueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint validBlueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
         MethodBindingAdmissionRecord validRecord = validBlueprint.admissionRecords().getFirst();
 
         // Build an unproxied / self-invocation record (P41)
-        AfastamentoAuthzPilotBlueprint selfInvBlueprint = AfastamentoAuthzPilotBlueprint.createHostBlueprint(
-                "praxis-ergon-showcase", "human-resources.unproxied-internal", "ergon.unproxied");
+        WorkforceLeaveAuthzPilotBlueprint selfInvBlueprint = WorkforceLeaveAuthzPilotBlueprint.createHostBlueprint(
+                "praxis-workforce-showcase", "human-resources.unproxied-internal", "workforce.unproxied");
         MethodBindingAdmissionRecord unproxiedRecord = new MethodBindingAdmissionRecord(
-                "praxis-ergon-showcase",
+                "praxis-workforce-showcase",
                 selfInvBlueprint.decisionPoint(),
                 selfInvBlueprint.enforcementBinding(),
                 Set.of(AdmittedInvocationChannel.PROXIED_INTERNAL_SERVICE),
@@ -43,11 +43,11 @@ class SemanticDecisionPointCatalogServiceTest {
         );
 
         // Build a record with ambiguous homonym wirePath (P45/P58), heuristic default AI usage (P57), and cyclic lineage (P64)
-        AfastamentoAuthzPilotBlueprint badLineageBlueprint = AfastamentoAuthzPilotBlueprint.createHostBlueprint(
-                "praxis-ergon-showcase", "human-resources.bad-lineage", "ergon.bad");
+        WorkforceLeaveAuthzPilotBlueprint badLineageBlueprint = WorkforceLeaveAuthzPilotBlueprint.createHostBlueprint(
+                "praxis-workforce-showcase", "human-resources.bad-lineage", "workforce.bad");
         List<FieldLineageCatalogEntry> badLineageEntries = List.of(
                 new FieldLineageCatalogEntry(
-                        "ergon.bad.attr_a",
+                        "workforce.bad.attr_a",
                         "concept:a",
                         "schema://bad/ResponseDTO",
                         "documento",
@@ -56,11 +56,11 @@ class SemanticDecisionPointCatalogServiceTest {
                         "DENIED",
                         false,
                         Set.of(FieldUseCategory.VALUE),
-                        List.of("ergon.bad.attr_b"), // Cycle: attr_a -> attr_b -> attr_a (P64)
+                        List.of("workforce.bad.attr_b"), // Cycle: attr_a -> attr_b -> attr_a (P64)
                         true
                 ),
                 new FieldLineageCatalogEntry(
-                        "ergon.bad.attr_b",
+                        "workforce.bad.attr_b",
                         "concept:b",
                         "schema://bad/ResponseDTO",
                         "documento", // P45/P58: Ambiguous homonym on same schemaRef + operationRole + wirePath!
@@ -69,12 +69,12 @@ class SemanticDecisionPointCatalogServiceTest {
                         "DEFAULT_PERMISSIVE", // P57: Permissive default AI usage!
                         true,
                         Set.of(FieldUseCategory.VALUE),
-                        List.of("ergon.bad.attr_a"),
+                        List.of("workforce.bad.attr_a"),
                         false
                 )
         );
         MethodBindingAdmissionRecord badLineageRecord = new MethodBindingAdmissionRecord(
-                "praxis-ergon-showcase",
+                "praxis-workforce-showcase",
                 badLineageBlueprint.decisionPoint(),
                 badLineageBlueprint.enforcementBinding(),
                 Set.of(AdmittedInvocationChannel.REST_ENDPOINT),
@@ -92,8 +92,8 @@ class SemanticDecisionPointCatalogServiceTest {
                 catalogService.queryCatalogForPap(new PapCatalogQueryRequest(
                         "author-1",
                         Set.of("REGULAR_AUTHOR"),
-                        Set.of("praxis-ergon-showcase"),
-                        "praxis-ergon-showcase"
+                        Set.of("praxis-workforce-showcase"),
+                        "praxis-workforce-showcase"
                 ))
         );
 
@@ -102,7 +102,7 @@ class SemanticDecisionPointCatalogServiceTest {
                 catalogService.queryCatalogForPap(new PapCatalogQueryRequest(
                         "author-1",
                         Set.of("praxis:authz:pap:catalog:read"),
-                        Set.of("praxis-ergon-showcase"),
+                        Set.of("praxis-workforce-showcase"),
                         "praxis-finance-service"
                 ))
         );
@@ -111,8 +111,8 @@ class SemanticDecisionPointCatalogServiceTest {
         PapCatalogViewResponse response = catalogService.queryCatalogForPap(new PapCatalogQueryRequest(
                 "author-1",
                 Set.of("praxis:authz:pap:catalog:read"),
-                Set.of("praxis-ergon-showcase"),
-                "praxis-ergon-showcase"
+                Set.of("praxis-workforce-showcase"),
+                "praxis-workforce-showcase"
         ));
 
         assertEquals(1, response.admittedDecisionPoints().size());
@@ -124,9 +124,9 @@ class SemanticDecisionPointCatalogServiceTest {
                 response.fieldLineageByPointKey().get(validBlueprint.decisionPoint().identity().pointKey());
         assertEquals(3, admittedLineage.size());
         assertTrue(admittedLineage.stream().anyMatch(e ->
-                e.wirePath().equals("cidCodigo") && e.attributeId().equals("ergon.afastamentos.cid_codigo")));
+                e.wirePath().equals("cidCodigo") && e.attributeId().equals("workforce.leaves.cid_codigo")));
         assertTrue(admittedLineage.stream().anyMatch(e ->
-                e.wirePath().equals("codigoCid10") && e.attributeId().equals("ergon.afastamentos.cid_codigo")));
+                e.wirePath().equals("codigoCid10") && e.attributeId().equals("workforce.leaves.cid_codigo")));
 
         // Verify diagnostics for the rejected points (P41, P45, P46, P49, P56, P57, P64)
         List<String> rejected = response.rejectedPointDiagnostics();

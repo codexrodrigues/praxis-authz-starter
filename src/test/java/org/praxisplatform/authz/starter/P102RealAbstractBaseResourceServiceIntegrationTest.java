@@ -83,7 +83,7 @@ import org.praxisplatform.authz.opa.client.OpaAuthorizationProviderAdapter;
 import org.praxisplatform.authz.opa.client.OpaClientTransport;
 import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.AiGovernanceMetadataView;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.SanitizedAiToolProjection;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
@@ -285,42 +285,42 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
             reason = "Representação de resposta de afastamento funcional"
     )
     public record AfastamentoAnnotatedResponseDTO(
-            @DomainLineage(attributeId = "ergon.afastamentos.id")
+            @DomainLineage(attributeId = "workforce.leaves.id")
             @Schema(nullable = false)
             Long id,
 
-            @DomainLineage(attributeId = "ergon.afastamentos.tenant_id")
+            @DomainLineage(attributeId = "workforce.leaves.tenant_id")
             @Schema(nullable = false)
             String tenantId,
 
             @DomainLineage(
                     sourceClass = P102AfastamentoJpaEntity.class,
                     sourcePaths = "cedenteOrgaoId",
-                    attributeId = "ergon.afastamentos.cedente_orgao_id"
+                    attributeId = "workforce.leaves.cedente_orgao_id"
             )
             @Schema(nullable = false)
             Long orgCedenteId,
 
-            @DomainLineage(attributeId = "ergon.afastamentos.cessionario_orgao_id")
+            @DomainLineage(attributeId = "workforce.leaves.cessionario_orgao_id")
             @Schema(nullable = false)
             Long orgCessionariaId,
 
-            @DomainLineage(attributeId = "ergon.afastamentos.lotacao_setor_id")
+            @DomainLineage(attributeId = "workforce.leaves.lotacao_setor_id")
             @Schema(nullable = true)
             Long lotacaoSetorId,
 
-            @DomainLineage(attributeId = "ergon.afastamentos.status_afastamento")
+            @DomainLineage(attributeId = "workforce.leaves.status_afastamento")
             @Schema(nullable = false)
             String statusAfastamento,
 
-            @DomainLineage(attributeId = "ergon.afastamentos.substituto_servidor_id")
+            @DomainLineage(attributeId = "workforce.leaves.substituto_servidor_id")
             @Schema(nullable = true)
             Long substitutoServidorId,
 
             @DomainLineage(
                     sourceClass = P102AfastamentoJpaEntity.class,
                     sourcePaths = "cidCodigo",
-                    attributeId = "ergon.afastamentos.cid_codigo"
+                    attributeId = "workforce.leaves.cid_codigo"
             )
             @Schema(nullable = true)
             String cidCodigo
@@ -331,7 +331,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
             @DomainLineage(
                     sourceClass = P102AfastamentoJpaEntity.class,
                     sourcePaths = "cidCodigo",
-                    attributeId = "ergon.afastamentos.cid_codigo"
+                    attributeId = "workforce.leaves.cid_codigo"
             )
             @DomainGovernance(
                     classification = DomainClassification.PUBLIC,
@@ -344,7 +344,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
     /** Interface contract with @DomainLineage and @NotNull on getter (P10.2-R02). */
     interface AuditedAfastamentoProjectionContract {
         @NotNull
-        @DomainLineage(attributeId = "ergon.afastamentos.id")
+        @DomainLineage(attributeId = "workforce.leaves.id")
         @Schema(description = "ID obrigatório via @NotNull sem nullable explícito no @Schema")
         Long getId();
     }
@@ -358,7 +358,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
     static class SuperPojoDto implements AuditedAfastamentoProjectionContract {
         Long id;
 
-        @DomainLineage(attributeId = "ergon.afastamentos.status_afastamento")
+        @DomainLineage(attributeId = "workforce.leaves.status_afastamento")
         String statusAfastamento;
 
         @Override
@@ -370,7 +370,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
     /** Subclass POJO DTO shadowing statusAfastamento and declaring getter @DomainGovernance (P10.2-R02). */
     static final class SubPojoDto extends SuperPojoDto {
         // Shadowed field in subclass must not duplicate fieldSchemas entry
-        @DomainLineage(attributeId = "ergon.afastamentos.status_afastamento")
+        @DomainLineage(attributeId = "workforce.leaves.status_afastamento")
         @NotNull
         String statusAfastamento;
 
@@ -379,7 +379,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         @DomainLineage(
                 sourceClass = P102AfastamentoJpaEntity.class,
                 sourcePaths = "cidCodigo",
-                attributeId = "ergon.afastamentos.cid_codigo"
+                attributeId = "workforce.leaves.cid_codigo"
         )
         public String getCidCodigo() {
             return cidCodigo;
@@ -388,24 +388,24 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
     /** Real {@code CreateDTO} Java record annotated with {@link DomainLineage}. */
     record AfastamentoAnnotatedCreateDTO(
-            @DomainLineage(attributeId = "ergon.afastamentos.id") Long id,
-            @DomainLineage(attributeId = "ergon.afastamentos.tenant_id") String tenantId,
-            @DomainLineage(attributeId = "ergon.afastamentos.cedente_orgao_id") Long orgCedenteId,
-            @DomainLineage(attributeId = "ergon.afastamentos.cessionario_orgao_id") Long orgCessionariaId,
-            @DomainLineage(attributeId = "ergon.afastamentos.lotacao_setor_id") Long lotacaoSetorId,
-            @DomainLineage(attributeId = "ergon.afastamentos.status_afastamento") String statusAfastamento,
-            @DomainLineage(attributeId = "ergon.afastamentos.substituto_servidor_id") Long substitutoServidorId,
-            @DomainLineage(attributeId = "ergon.afastamentos.cid_codigo") String cidCodigo
+            @DomainLineage(attributeId = "workforce.leaves.id") Long id,
+            @DomainLineage(attributeId = "workforce.leaves.tenant_id") String tenantId,
+            @DomainLineage(attributeId = "workforce.leaves.cedente_orgao_id") Long orgCedenteId,
+            @DomainLineage(attributeId = "workforce.leaves.cessionario_orgao_id") Long orgCessionariaId,
+            @DomainLineage(attributeId = "workforce.leaves.lotacao_setor_id") Long lotacaoSetorId,
+            @DomainLineage(attributeId = "workforce.leaves.status_afastamento") String statusAfastamento,
+            @DomainLineage(attributeId = "workforce.leaves.substituto_servidor_id") Long substitutoServidorId,
+            @DomainLineage(attributeId = "workforce.leaves.cid_codigo") String cidCodigo
     ) {}
 
     /** Real {@code UpdateDTO} Java record annotated with {@link DomainLineage} and {@link BulkEditable}. */
     record AfastamentoAnnotatedUpdateDTO(
-            @DomainLineage(attributeId = "ergon.afastamentos.substituto_servidor_id")
+            @DomainLineage(attributeId = "workforce.leaves.substituto_servidor_id")
             @BulkEditable(modes = {BulkMode.UNIFORM_UPDATE, BulkMode.PER_ITEM_UPDATE}, allowClear = true)
             @Schema(nullable = true)
             Long substitutoServidorId,
 
-            @DomainLineage(attributeId = "ergon.afastamentos.cid_codigo")
+            @DomainLineage(attributeId = "workforce.leaves.cid_codigo")
             @BulkEditable(modes = {BulkMode.UNIFORM_UPDATE, BulkMode.PER_ITEM_UPDATE}, allowClear = true)
             @Schema(nullable = true)
             String cidCodigo
@@ -439,15 +439,15 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
             reason = "DTO com segredo VALUE+DENY para auditoria AUTHZ-HOST-011 e AUTHZ-HOST-012"
     )
     record SecretTokenAfastamentoResponseDTO(
-            @DomainLineage(attributeId = "ergon.afastamentos.id") Long id,
-            @DomainLineage(attributeId = "ergon.afastamentos.tenant_id") String tenantId,
-            @DomainLineage(attributeId = "ergon.afastamentos.cedente_orgao_id")
+            @DomainLineage(attributeId = "workforce.leaves.id") Long id,
+            @DomainLineage(attributeId = "workforce.leaves.tenant_id") String tenantId,
+            @DomainLineage(attributeId = "workforce.leaves.cedente_orgao_id")
             @DomainGovernance(exportable = false, reason = "Internal custody identifier excluded from CSV export")
             Long orgCedenteId,
-            @DomainLineage(attributeId = "ergon.afastamentos.cessionario_orgao_id") Long orgCessionariaId,
-            @DomainLineage(attributeId = "ergon.afastamentos.lotacao_setor_id") Long lotacaoSetorId,
-            @DomainLineage(attributeId = "ergon.afastamentos.status_afastamento") String statusAfastamento,
-            @DomainLineage(attributeId = "ergon.afastamentos.webhook_token")
+            @DomainLineage(attributeId = "workforce.leaves.cessionario_orgao_id") Long orgCessionariaId,
+            @DomainLineage(attributeId = "workforce.leaves.lotacao_setor_id") Long lotacaoSetorId,
+            @DomainLineage(attributeId = "workforce.leaves.status_afastamento") String statusAfastamento,
+            @DomainLineage(attributeId = "workforce.leaves.webhook_token")
             @DomainGovernance(
                     classification = DomainClassification.RESTRICTED,
                     dataCategory = DomainDataCategory.CREDENTIAL,
@@ -474,7 +474,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
             AfastamentoAnnotatedCreateDTO,
             AfastamentoAnnotatedUpdateDTO
     > {
-        private final AfastamentoAuthzPilotBlueprint blueprint;
+        private final WorkforceLeaveAuthzPilotBlueprint blueprint;
         private final AuthzGovernedResourceServiceSupport serviceSupport;
         private final JpaDataScopeAdapter jpaAdapter;
         private final JpaCriteriaDataScopeTranslator criteriaTranslator;
@@ -499,7 +499,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
         AfastamentoGovernedResourceService(
                 P102AfastamentoRepository repository,
-                AfastamentoAuthzPilotBlueprint blueprint,
+                WorkforceLeaveAuthzPilotBlueprint blueprint,
                 AuthzGovernedResourceServiceSupport serviceSupport,
                 JpaDataScopeAdapter jpaAdapter,
                 JpaCriteriaDataScopeTranslator criteriaTranslator
@@ -593,7 +593,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     Set.of("Authorization", "Accept"),
                     Map.of("subject.principalId", "usr-gestor-101", "subject.organizationUnitIds", List.of(100L)),
                     Map.of("subject.principalId", FactResolutionStatus.PRESENT, "subject.organizationUnitIds", FactResolutionStatus.PRESENT),
-                    Map.of(FieldUseCategory.FILTER, Set.of("ergon.afastamentos.lotacao_setor_id")),
+                    Map.of(FieldUseCategory.FILTER, Set.of("workforce.leaves.lotacao_setor_id")),
                     responseContract.baselineFieldUseDirectives(),
                     jpaAdapter,
                     "e.tenantId = :tenantId",
@@ -660,11 +660,11 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     createContract.wirePointerToAttributeIdMap(),
                     Set.of(),
                     Set.of(
-                            "ergon.afastamentos.id",
-                            "ergon.afastamentos.tenant_id",
-                            "ergon.afastamentos.cedente_orgao_id",
-                            "ergon.afastamentos.cessionario_orgao_id",
-                            "ergon.afastamentos.lotacao_setor_id"
+                            "workforce.leaves.id",
+                            "workforce.leaves.tenant_id",
+                            "workforce.leaves.cedente_orgao_id",
+                            "workforce.leaves.cessionario_orgao_id",
+                            "workforce.leaves.lotacao_setor_id"
                     ),
                     blueprint.dualScopeSpec(),
                     callerIsCedente.get(),
@@ -717,7 +717,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     rawPayload,
                     updateContract.wirePointerToAttributeIdMap(),
                     Set.of(),
-                    Set.of("ergon.afastamentos.lotacao_setor_id"),
+                    Set.of("workforce.leaves.lotacao_setor_id"),
                     blueprint.dualScopeSpec(),
                     callerIsCedente.get(),
                     true,
@@ -893,8 +893,8 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
     /** Command request DTO for @WorkflowAction "homologar-afastamento" (Fase P10.4). */
     record HomologarAfastamentoCommandDTO(
-            @DomainLineage(attributeId = "ergon.afastamentos.status_afastamento") String statusAfastamento,
-            @DomainLineage(attributeId = "ergon.afastamentos.substituto_servidor_id") Long substitutoServidorId
+            @DomainLineage(attributeId = "workforce.leaves.status_afastamento") String statusAfastamento,
+            @DomainLineage(attributeId = "workforce.leaves.substituto_servidor_id") Long substitutoServidorId
     ) {}
 
     /**
@@ -911,13 +911,13 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     AfastamentoAnnotatedUpdateDTO
             > {
 
-        private final AfastamentoAuthzPilotBlueprint blueprint;
+        private final WorkforceLeaveAuthzPilotBlueprint blueprint;
         private final AuthzGovernedResourceServiceSupport serviceSupport;
         private final IntrospectedDtoGovernanceContract homologarContract;
 
         VersionedAfastamentoGovernedResourceService(
                 P102AfastamentoRepository repository,
-                AfastamentoAuthzPilotBlueprint blueprint,
+                WorkforceLeaveAuthzPilotBlueprint blueprint,
                 AuthzGovernedResourceServiceSupport serviceSupport,
                 JpaDataScopeAdapter jpaAdapter,
                 JpaCriteriaDataScopeTranslator criteriaTranslator
@@ -969,7 +969,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                         rawPayload,
                         homologarContract.wirePointerToAttributeIdMap(),
                         Set.of(),
-                        Set.of("ergon.afastamentos.lotacao_setor_id"),
+                        Set.of("workforce.leaves.lotacao_setor_id"),
                         blueprint.dualScopeSpec(),
                         callerIsCedente.get(),
                         true,
@@ -999,7 +999,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
     @Test
     void verifyP102MetadataDtoGovernanceIntrospectionAndRealAbstractBaseResourceServiceLifecycle() throws Exception {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         // 1. Verify MetadataDtoGovernanceIntrospector automatically extracts @DomainLineage, @DomainGovernance, and @Schema
         MetadataDtoGovernanceIntrospector introspector = new MetadataDtoGovernanceIntrospector();
@@ -1009,20 +1009,20 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         );
         assertEquals(8, responseContract.fieldSchemas().size());
         assertTrue(responseContract.nonExportableFieldNames().contains("orgCedenteId"));
-        assertTrue(responseContract.nonExportableFieldNames().contains("ergon.afastamentos.cedente_orgao_id"));
+        assertTrue(responseContract.nonExportableFieldNames().contains("workforce.leaves.cedente_orgao_id"));
         assertTrue(responseContract.nonExportableFieldNames().contains("cidCodigo"),
                 "LGPD_SENSITIVE_DATA preset has exportable = false and must be auto-detected");
-        assertTrue(responseContract.nonExportableFieldNames().contains("ergon.afastamentos.cid_codigo"));
-        assertEquals("ergon.afastamentos.cid_codigo", responseContract.wirePointerToAttributeIdMap().get("/cidCodigo"));
-        assertEquals("ergon.afastamentos.substituto_servidor_id",
+        assertTrue(responseContract.nonExportableFieldNames().contains("workforce.leaves.cid_codigo"));
+        assertEquals("workforce.leaves.cid_codigo", responseContract.wirePointerToAttributeIdMap().get("/cidCodigo"));
+        assertEquals("workforce.leaves.substituto_servidor_id",
                 responseContract.wirePointerToAttributeIdMap().get("/substitutoServidorId"));
 
         // Verify LGPD_SENSITIVE_DATA generated baseline DENY directives for FILTER, SORT, GROUP, AGGREGATE, JOIN + AI_CONTEXT denied
         List<FieldUseEffectDirective> cidDirectives = responseContract.baselineFieldUseDirectives().stream()
-                .filter(d -> "ergon.afastamentos.cid_codigo".equals(d.attributeId()) && d.effect() == RuleEffect.DENY)
+                .filter(d -> "workforce.leaves.cid_codigo".equals(d.attributeId()) && d.effect() == RuleEffect.DENY)
                 .toList();
         assertEquals(5, cidDirectives.size());
-        assertTrue(responseContract.aiContextDeniedAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+        assertTrue(responseContract.aiContextDeniedAttributeIds().contains("workforce.leaves.cid_codigo"));
         assertTrue(responseContract.aiContextDeniedAttributeIds().contains("cidCodigo"));
 
         // Verify DomainLineage anti-weakening enforcement (P46/P49)
@@ -1097,7 +1097,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                 List.of(new QueryAdapterFieldBinding(
                         blueprint.resourceKey(),
                         "resource.lotacaoSetorId",
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "lotacaoSetorId",
                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                         true
@@ -1108,7 +1108,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                 List.of(new QueryAdapterFieldBinding(
                         blueprint.resourceKey(),
                         "resource.lotacaoSetorId",
-                        "ergon.afastamentos.lotacao_setor_id",
+                        "workforce.leaves.lotacao_setor_id",
                         "lotacaoSetorId",
                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                         true
@@ -1391,9 +1391,9 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                 blueprint.factContract().factContractDigest(),
                 blueprint.dualScopeSpec(),
                 Map.of(
-                        "homologar-afastamento", Set.of("ergon.afastamentos.status_afastamento"),
-                        "designar-substituto", Set.of("ergon.afastamentos.substituto_servidor_id"),
-                        "alterar-cid-medico", Set.of("ergon.afastamentos.cid_codigo")
+                        "homologar-afastamento", Set.of("workforce.leaves.status_afastamento"),
+                        "designar-substituto", Set.of("workforce.leaves.substituto_servidor_id"),
+                        "alterar-cid-medico", Set.of("workforce.leaves.cid_codigo")
                 ),
                 () -> new CallerAvailabilityFactContext(
                         Map.of(
@@ -1623,23 +1623,23 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         // 12. Enterprise Critical Review Regressions (P10.4-R01 .. P10.4-R06)
         // P10.4-R01: UnmappedResourcePolicy.FAIL_CLOSED vs ALLOW_UNMAPPED_FOR_INCREMENTAL_ADOPTION across all 3 interfaces
         ActionDefinition unmappedActionDef = new ActionDefinition(
-                "unmapped-action", "ergon.unmapped-resource", "/api/human-resources/unmapped",
+                "unmapped-action", "workforce.unmapped-resource", "/api/human-resources/unmapped",
                 "human-resources", ActionScope.COLLECTION, "Unmapped", "Unmapped action",
                 null, null, null, 1, "Done", List.of(), List.of(), List.of(),
                 ActionExecutionContract.defaults(ActionScope.COLLECTION)
         );
         ActionAvailabilityContext unmappedActionCtx = new ActionAvailabilityContext(
-                "ergon.unmapped-resource", "/api/human-resources/unmapped", null,
+                "workforce.unmapped-resource", "/api/human-resources/unmapped", null,
                 "tenant-gov-br", Locale.ROOT, () -> "usr-gestor-101", Set.of("ROLE_GESTOR"), null
         );
         SurfaceDefinition unmappedSurfaceDef = new SurfaceDefinition(
-                "detail", "ergon.unmapped-resource", "/api/human-resources/unmapped",
+                "detail", "workforce.unmapped-resource", "/api/human-resources/unmapped",
                 "human-resources", SurfaceKind.VIEW, SurfaceScope.COLLECTION, "Unmapped", "Unmapped surface",
                 "detail", "visibility", "response", SurfaceResponseCardinality.OBJECT,
                 null, null, 1, List.of(), List.of(), List.of(), null
         );
         SurfaceAvailabilityContext unmappedSurfaceCtx = new SurfaceAvailabilityContext(
-                "ergon.unmapped-resource", "/api/human-resources/unmapped", null,
+                "workforce.unmapped-resource", "/api/human-resources/unmapped", null,
                 "tenant-gov-br", Locale.ROOT, () -> "usr-gestor-101", Set.of("ROLE_GESTOR"), null
         );
         // Default availabilityProvider uses FAIL_CLOSED (P20)
@@ -2081,7 +2081,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                 )
         );
         assertTrue(statsFieldUseEx.getMessage().contains("GROUP"));
-        assertTrue(statsFieldUseEx.getMessage().contains("ergon.afastamentos.cid_codigo"));
+        assertTrue(statsFieldUseEx.getMessage().contains("workforce.leaves.cid_codigo"));
         assertFalse(serviceSupport.hasActiveQueryContext());
 
         // 15d. Governed Reactive Determination Provider & Runtime Execution (P05, P12, P13, P14, P50)
@@ -2205,13 +2205,13 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         assertEquals(blueprint.bundleArtifact().runtimeHead().policySetDigest(), aiProjection101.policySetDigest());
         assertFalse(aiProjection101.detachedPayload().containsKey("cidCodigo"),
                 "AI context projection must completely suppress cidCodigo (LGPD_SENSITIVE_DATA aiAllowed=false) (P47/P57/P62)");
-        assertTrue(aiProjection101.suppressedAiAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+        assertTrue(aiProjection101.suppressedAiAttributeIds().contains("workforce.leaves.cid_codigo"));
         assertEquals(8080L, aiProjection101.detachedPayload().get("substitutoServidorId"));
 
         List<AiGovernanceMetadataView> aiMetadataViews = governedDeterminationProvider.projectAiGovernanceMetadata();
         assertEquals(8, aiMetadataViews.size());
         AiGovernanceMetadataView cidAiMeta = aiMetadataViews.stream()
-                .filter(v -> "ergon.afastamentos.cid_codigo".equals(v.attributeId()))
+                .filter(v -> "workforce.leaves.cid_codigo".equals(v.attributeId()))
                 .findFirst()
                 .orElseThrow();
         assertEquals("NONE", cidAiMeta.aiUsageMode());
@@ -2331,7 +2331,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                 List.of(new QueryAdapterFieldBinding(
                                         blueprint.resourceKey(),
                                         "resource.lotacaoSetorId",
-                                        "ergon.afastamentos.lotacao_setor_id",
+                                        "workforce.leaves.lotacao_setor_id",
                                         "lotacaoSetorId",
                                         RelationTraversalStrategy.INNER_JOIN_SCALAR,
                                         true
@@ -2342,16 +2342,16 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                         .cedenteCustody("cedenteOrgaoId", "subject.cedenteOrgaoIds")
                         .cessionarioCustody("cessionarioOrgaoId", "subject.cessionarioOrgaoIds")
                         .operationModifiedAttributes(Map.of(
-                                "homologar-afastamento", Set.of("ergon.afastamentos.status_afastamento"),
-                                "designar-substituto", Set.of("ergon.afastamentos.substituto_servidor_id"),
-                                "alterar-cid-medico", Set.of("ergon.afastamentos.cid_codigo")
+                                "homologar-afastamento", Set.of("workforce.leaves.status_afastamento"),
+                                "designar-substituto", Set.of("workforce.leaves.substituto_servidor_id"),
+                                "alterar-cid-medico", Set.of("workforce.leaves.cid_codigo")
                         ))
                         .mandatoryScopeAnchorAttributeIds(Set.of(
-                                "ergon.afastamentos.id",
-                                "ergon.afastamentos.tenant_id",
-                                "ergon.afastamentos.cedente_orgao_id",
-                                "ergon.afastamentos.cessionario_orgao_id",
-                                "ergon.afastamentos.lotacao_setor_id"
+                                "workforce.leaves.id",
+                                "workforce.leaves.tenant_id",
+                                "workforce.leaves.cedente_orgao_id",
+                                "workforce.leaves.cessionario_orgao_id",
+                                "workforce.leaves.lotacao_setor_id"
                         ))
                         .tenantField("tenantId")
                         .build();
@@ -2435,7 +2435,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         record UnannotatedWriteDto(Long orgCedenteId, String cidCodigo, String customWriteOnlyNotes) {}
         IntrospectedDtoGovernanceContract inheritedWriteContract = introspector.introspectWriteDto(
                 UnannotatedWriteDto.class, AfastamentoAnnotatedResponseDTO.class, blueprint.resourceKey());
-        assertEquals("ergon.afastamentos.cedente_orgao_id",
+        assertEquals("workforce.leaves.cedente_orgao_id",
                 inheritedWriteContract.wirePointerToAttributeIdMap().get("/orgCedenteId"),
                 "P10.8-R01: introspectWriteDto must inherit ResponseDTO @DomainLineage attributeId when WriteDTO omits @DomainLineage");
         assertEquals("human_resources.afastamentos.custom_write_only_notes",
@@ -2635,7 +2635,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             List.of(new QueryAdapterFieldBinding(
                                                     blueprint.resourceKey(),
                                                     "resource.lotacaoSetorId",
-                                                    "ergon.afastamentos.lotacao_setor_id",
+                                                    "workforce.leaves.lotacao_setor_id",
                                                     "lotacaoSetorId",
                                                     RelationTraversalStrategy.INNER_JOIN_SCALAR,
                                                     true
@@ -2815,7 +2815,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
                     // 20d (P10.10-R03): Command DTO with request-only workflow parameters (justificativaHomologacao, numeroProcessoSei)
                     // that are NOT on ResponseDTO and have no @DomainLineage: must NOT trigger false-positive AUTHZ_FIELD_WRITE_DEFAULT_DENIED
-                    // when operationModifiedAttributes declares the modified entity attribute ("ergon.afastamentos.status_afastamento").
+                    // when operationModifiedAttributes declares the modified entity attribute ("workforce.leaves.status_afastamento").
                     autoCallerProvider.callWithContext(pureCedenteCaller, () ->
                             txTemplate.execute(status -> autoWiredService.reverterParaDeferidoSemVersao(101L))
                     );
@@ -2829,7 +2829,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             autoWiredService.homologarComJustificativa(101L, cmdComJustificativa)
                                     )
                             ),
-                            "P10.10-R03: Pure Cessionário caller must still be blocked on declaredModifiedAttrs ('ergon.afastamentos.status_afastamento')"
+                            "P10.10-R03: Pure Cessionário caller must still be blocked on declaredModifiedAttrs ('workforce.leaves.status_afastamento')"
                     );
                     AfastamentoAnnotatedResponseDTO homologadoComJustificativa = autoCallerProvider.callWithContext(pureCedenteCaller, () ->
                             txTemplate.execute(status ->
@@ -2842,16 +2842,16 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
                     // 20e (P10.10-R01): Action vs. Surface namespace isolation when @WorkflowAction and @UiSurface share the same ID
                     org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor actionOnlyDp =
-                            AfastamentoAuthzPilotBlueprint.createHostBlueprint(
-                                    "praxis-ergon-showcase",
+                            WorkforceLeaveAuthzPilotBlueprint.createHostBlueprint(
+                                    "praxis-workforce-showcase",
                                     "human-resources.afastamentos.action-alocacao",
-                                    "ergon.afastamentos"
+                                    "workforce.leaves"
                             ).decisionPoint();
                     org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor surfaceOnlyDp =
-                            AfastamentoAuthzPilotBlueprint.createHostBlueprint(
-                                    "praxis-ergon-showcase",
+                            WorkforceLeaveAuthzPilotBlueprint.createHostBlueprint(
+                                    "praxis-workforce-showcase",
                                     "human-resources.afastamentos.surface-alocacao",
-                                    "ergon.afastamentos"
+                                    "workforce.leaves"
                             ).decisionPoint();
                     AuthzResourceGovernanceSpec<P102AfastamentoJpaEntity> actionRoutingSpec =
                             AuthzResourceGovernanceSpec.<P102AfastamentoJpaEntity>builder(blueprint.resourceKey())
@@ -3030,7 +3030,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     assertNotNull(itemAi101);
                     assertFalse(itemAi101.detachedPayload().containsKey("cidCodigo"),
                             "P10.11: projectGovernedItemAiContext must completely suppress LGPD_SENSITIVE_DATA cidCodigo");
-                    assertTrue(itemAi101.suppressedAiAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+                    assertTrue(itemAi101.suppressedAiAttributeIds().contains("workforce.leaves.cid_codigo"));
                     assertEquals(blueprint.bundleArtifact().runtimeHead().runtimeRevision(), itemAi101.runtimeRevision());
                     assertEquals(8, autoWiredService.projectAiGovernanceMetadata().size());
 
@@ -3150,8 +3150,8 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "BROKEN_DUAL_SCOPE",
                             "resource.orgCedenteId",
                             "resource.orgCessionariaId",
-                            Set.of("ergon.afastamentos.status_afastamento", "ergon.afastamentos.unmapped_cedente_attr"),
-                            Set.of("ergon.afastamentos.substituto_servidor_id", "ergon.afastamentos.unmapped_cessionario_attr")
+                            Set.of("workforce.leaves.status_afastamento", "workforce.leaves.unmapped_cedente_attr"),
+                            Set.of("workforce.leaves.substituto_servidor_id", "workforce.leaves.unmapped_cessionario_attr")
                     );
                     AuthzResourceGovernanceSpec<P102AfastamentoJpaEntity> brokenSpec =
                             AuthzResourceGovernanceSpec.<P102AfastamentoJpaEntity>builder(blueprint.resourceKey())
@@ -3162,7 +3162,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             List.of(new QueryAdapterFieldBinding(
                                                     blueprint.resourceKey(),
                                                     "resource.lotacaoSetorId",
-                                                    "ergon.afastamentos.lotacao_setor_id",
+                                                    "workforce.leaves.lotacao_setor_id",
                                                     "e.nonExistentJpaField",
                                                     RelationTraversalStrategy.INNER_JOIN_SCALAR,
                                                     true
@@ -3170,10 +3170,10 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     )
                                     .tenantField("nonExistentTenantField")
                                     .stateField("nonExistentStateField")
-                                    .mandatoryScopeAnchorAttributeIds(Set.of("ergon.afastamentos.non_existent_anchor"))
+                                    .mandatoryScopeAnchorAttributeIds(Set.of("workforce.leaves.non_existent_anchor"))
                                     .dualScopeDelegationSpec(brokenDualScope)
                                     .operationModifiedAttributes("empty-op", Set.of())
-                                    .operationModifiedAttributes("bad-op", Set.of("ergon.afastamentos.unknown_op_attr"))
+                                    .operationModifiedAttributes("bad-op", Set.of("workforce.leaves.unknown_op_attr"))
                                     .build();
 
                     AuthzHostReadinessReviewer reviewerWithRegistry = new AuthzHostReadinessReviewer(
@@ -3282,7 +3282,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "P10.13: All CreateDTO and UpdateDTO properties must inherit explicitGovernanceDeclared=true from ResponseDTO");
 
                     List<org.praxisplatform.authz.catalog.FieldLineageCatalogEntry> cidEntries = derivedLineage.stream()
-                            .filter(e -> "ergon.afastamentos.cid_codigo".equals(e.attributeId()))
+                            .filter(e -> "workforce.leaves.cid_codigo".equals(e.attributeId()))
                             .toList();
                     assertEquals(3, cidEntries.size());
                     for (org.praxisplatform.authz.catalog.FieldLineageCatalogEntry cidEntry : cidEntries) {
@@ -3303,9 +3303,9 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             AfastamentoAnnotatedResponseDTO.class,
                             blueprint.resourceKey()
                     );
-                    assertTrue(inheritedCreateContract.aiContextDeniedAttributeIds().contains("ergon.afastamentos.cid_codigo"),
+                    assertTrue(inheritedCreateContract.aiContextDeniedAttributeIds().contains("workforce.leaves.cid_codigo"),
                             "P10.13: introspectWriteDto must inherit aiContextDeniedAttributeIds from ResponseDTO");
-                    assertTrue(inheritedCreateContract.nonExportableFieldNames().contains("ergon.afastamentos.cedente_orgao_id"),
+                    assertTrue(inheritedCreateContract.nonExportableFieldNames().contains("workforce.leaves.cedente_orgao_id"),
                             "P10.13: introspectWriteDto must inherit nonExportableFieldNames from ResponseDTO");
                     assertFalse(inheritedCreateContract.baselineFieldUseDirectives().isEmpty(),
                             "P10.13: introspectWriteDto must inherit baselineFieldUseDirectives from ResponseDTO");
@@ -3335,7 +3335,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             syncRegistry.requireRegisteredPoint(blueprint.decisionPoint().identity().pointKey());
                     assertNotNull(enrichedRegCtx.dualScopeSpec(),
                             "P10.13: synchronizeCatalogAndRegistryIfSupported must populate DualScopeDelegationSpec in RuntimeDecisionPointRegistry");
-                    assertTrue(enrichedRegCtx.mandatoryScopeAnchorAttributes().contains("ergon.afastamentos.lotacao_setor_id"),
+                    assertTrue(enrichedRegCtx.mandatoryScopeAnchorAttributes().contains("workforce.leaves.lotacao_setor_id"),
                             "P10.13: synchronizeCatalogAndRegistryIfSupported must populate mandatoryScopeAnchorAttributes in RuntimeDecisionPointRegistry");
                     assertEquals(18, enrichedRegCtx.admissionRecord().fieldLineageEntries().size(),
                             "P10.13: synchronizeCatalogAndRegistryIfSupported must enrich admissionRecord fieldLineageEntries in RuntimeDecisionPointRegistry");
@@ -3389,12 +3389,12 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .serviceKey(blueprint.serviceKey())
                                     .scalarFieldBinding(
                                             "resource.lotacaoSetorId",
-                                            "ergon.afastamentos.lotacao_setor_id",
+                                            "workforce.leaves.lotacao_setor_id",
                                             "lotacaoSetorId"
                                     )
                                     .resourceSensitiveFact(
                                             "resource.cidCodigo",
-                                            "ergon.afastamentos.cid_codigo",
+                                            "workforce.leaves.cid_codigo",
                                             org.praxisplatform.authz.contracts.context.FactValueType.STRING,
                                             "HEALTH_DATA",
                                             "OFFICIAL_HEALTH_EXPERTISE"
@@ -3404,16 +3404,16 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .cedenteCustody("cedenteOrgaoId", "subject.cedenteOrgaoIds")
                                     .cessionarioCustody("cessionarioOrgaoId", "subject.cessionarioOrgaoIds")
                                     .operationModifiedAttributes(Map.of(
-                                            "homologar-afastamento", Set.of("ergon.afastamentos.status_afastamento"),
-                                            "designar-substituto", Set.of("ergon.afastamentos.substituto_servidor_id"),
-                                            "alterar-cid-medico", Set.of("ergon.afastamentos.cid_codigo")
+                                            "homologar-afastamento", Set.of("workforce.leaves.status_afastamento"),
+                                            "designar-substituto", Set.of("workforce.leaves.substituto_servidor_id"),
+                                            "alterar-cid-medico", Set.of("workforce.leaves.cid_codigo")
                                     ))
                                     .mandatoryScopeAnchorAttributeIds(Set.of(
-                                            "ergon.afastamentos.id",
-                                            "ergon.afastamentos.tenant_id",
-                                            "ergon.afastamentos.cedente_orgao_id",
-                                            "ergon.afastamentos.cessionario_orgao_id",
-                                            "ergon.afastamentos.lotacao_setor_id"
+                                            "workforce.leaves.id",
+                                            "workforce.leaves.tenant_id",
+                                            "workforce.leaves.cedente_orgao_id",
+                                            "workforce.leaves.cessionario_orgao_id",
+                                            "workforce.leaves.lotacao_setor_id"
                                     ))
                                     .tenantField("tenantId")
                                     .build();
@@ -3464,7 +3464,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             "rule-allow-lotacao-bootstrap",
                                             "resource.lotacaoSetorId",
                                             "subject.organizationUnitIds",
-                                            Map.of("ergon.afastamentos.cid_codigo", "***CID-RESTRITO***")
+                                            Map.of("workforce.leaves.cid_codigo", "***CID-RESTRITO***")
                                     )
                                     .build(introspectorBean);
 
@@ -3561,6 +3561,8 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                 assertEquals(null, cleanStartupCtx.getStartupFailure(),
                                         "P10.14-C: Startup readiness gate must succeed when all governed services have zero issues");
                             });
+                    // Restore outer live ApplicationContext autowired providers after cleanStartupCtx closes.
+                    ctx.getAutowireCapableBeanFactory().autowireBean(autoWiredService);
 
                     // 2) Fails closed on startup when fail-on-warning=true and a manual-override service (AUTHZ-HOST-001 warning) is registered
                     new ApplicationContextRunner()
@@ -3613,7 +3615,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                         "P10.15-A: Filtering by @Filterable cidCodigo must automatically extract FieldUseCategory.FILTER and fail closed"
                                 );
                                 assertEquals(FieldUseCategory.FILTER, filterCidEx.getCategory());
-                                assertTrue(filterCidEx.getForbiddenAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+                                assertTrue(filterCidEx.getForbiddenAttributeIds().contains("workforce.leaves.cid_codigo"));
 
                                 // 2) Omnibox @Filterable(relations = {"statusAfastamento", "cidCodigo"}) fails closed when populated
                                 AfastamentoFilterDTO omniboxCidFilter = new AfastamentoFilterDTO();
@@ -3624,7 +3626,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                         "P10.15-A: Omnibox @Filterable(relations = {..., cidCodigo}) must fail closed against oracle probing"
                                 );
                                 assertEquals(FieldUseCategory.FILTER, omniboxEx.getCategory());
-                                assertTrue(omniboxEx.getForbiddenAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+                                assertTrue(omniboxEx.getForbiddenAttributeIds().contains("workforce.leaves.cid_codigo"));
 
                                 // 3) Pageable Sort.by("cidCodigo") fails closed without manual withRequestedQueryFieldUses
                                 FieldUseViolationException sortCidEx = assertThrows(
@@ -3636,7 +3638,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                         "P10.15-A: Sorting by cidCodigo via Pageable must automatically extract FieldUseCategory.SORT and fail closed"
                                 );
                                 assertEquals(FieldUseCategory.SORT, sortCidEx.getCategory());
-                                assertTrue(sortCidEx.getForbiddenAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+                                assertTrue(sortCidEx.getForbiddenAttributeIds().contains("workforce.leaves.cid_codigo"));
 
                                 // 4) CollectionExportRequest with sort=List.of("cidCodigo,asc") fails closed
                                 CollectionExportRequest<AfastamentoFilterDTO> exportWithCidSort = new CollectionExportRequest<>(
@@ -3651,7 +3653,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                         "P10.15-A: CollectionExportRequest sorting by cidCodigo must fail closed"
                                 );
                                 assertEquals(FieldUseCategory.SORT, exportSortEx.getCategory());
-                                assertTrue(exportSortEx.getForbiddenAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+                                assertTrue(exportSortEx.getForbiddenAttributeIds().contains("workforce.leaves.cid_codigo"));
 
                                 // 5) Allowed filter + sort on statusAfastamento succeeds and masks cidCodigo
                                 AfastamentoFilterDTO allowedFilter = new AfastamentoFilterDTO();
@@ -3776,12 +3778,12 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .factContract(selfContainedSpec.factContract())
                                     .scalarFieldBinding(
                                             "resource.lotacaoSetorId",
-                                            "ergon.afastamentos.lotacao_setor_id",
+                                            "workforce.leaves.lotacao_setor_id",
                                             "lotacaoSetorId"
                                     )
                                     .resourceSensitiveFact(
                                             "resource.cidCodigo",
-                                            "ergon.afastamentos.cid_codigo",
+                                            "workforce.leaves.cid_codigo",
                                             org.praxisplatform.authz.contracts.context.FactValueType.STRING,
                                             "HEALTH_DATA",
                                             "OFFICIAL_HEALTH_EXPERTISE"
@@ -3791,17 +3793,17 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .cedenteCustody("cedenteOrgaoId", "subject.cedenteOrgaoIds")
                                     .cessionarioCustody("cessionarioOrgaoId", "subject.cessionarioOrgaoIds")
                                     .mandatoryScopeAnchorAttributeIds(Set.of(
-                                            "ergon.afastamentos.id",
-                                            "ergon.afastamentos.tenant_id",
-                                            "ergon.afastamentos.cedente_orgao_id",
-                                            "ergon.afastamentos.cessionario_orgao_id",
-                                            "ergon.afastamentos.lotacao_setor_id"
+                                            "workforce.leaves.id",
+                                            "workforce.leaves.tenant_id",
+                                            "workforce.leaves.cedente_orgao_id",
+                                            "workforce.leaves.cessionario_orgao_id",
+                                            "workforce.leaves.lotacao_setor_id"
                                     ))
                                     .actionDecisionPoint("homologar-afastamento", homologarActionDp)
                                     .surfaceDecisionPoint("ficha-medica-360", fichaSurfaceDp)
                                     .operationModifiedAttributes(
                                             "homologar-afastamento",
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .tenantField("tenantId")
                                     .build();
@@ -3823,7 +3825,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             "rule-primary-org-scope",
                                             "resource.lotacaoSetorId",
                                             "subject.organizationUnitIds",
-                                            Map.of("ergon.afastamentos.cid_codigo", "***CID-RESTRITO***")
+                                            Map.of("workforce.leaves.cid_codigo", "***CID-RESTRITO***")
                                     )
                                     .addActionPolicy(
                                             fullActionSurfaceSpec,
@@ -3833,14 +3835,14 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                                     Map.of("var", "resource.lotacaoSetorId"),
                                                     Map.of("var", "subject.organizationUnitIds")
                                             )),
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .addSurfacePolicy(
                                             fullActionSurfaceSpec,
                                             "ficha-medica-360",
                                             "rule-surface-ficha-360",
                                             Map.of("!=", List.of(Map.of("var", "subject.principalId"), "")),
-                                            Map.of("ergon.afastamentos.cid_codigo", "***CID-RESTRITO-360***")
+                                            Map.of("workforce.leaves.cid_codigo", "***CID-RESTRITO-360***")
                                     )
                                     .build(introspectorBean);
 
@@ -3884,15 +3886,15 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .factContract(selfContainedSpec.factContract())
                                     .scalarFieldBinding(
                                             "resource.lotacaoSetorId",
-                                            "ergon.afastamentos.lotacao_setor_id",
+                                            "workforce.leaves.lotacao_setor_id",
                                             "lotacaoSetorId"
                                     )
                                     .mandatoryScopeAnchorAttributeIds(Set.of(
-                                            "ergon.afastamentos.id",
-                                            "ergon.afastamentos.tenant_id",
-                                            "ergon.afastamentos.cedente_orgao_id",
-                                            "ergon.afastamentos.cessionario_orgao_id",
-                                            "ergon.afastamentos.lotacao_setor_id"
+                                            "workforce.leaves.id",
+                                            "workforce.leaves.tenant_id",
+                                            "workforce.leaves.cedente_orgao_id",
+                                            "workforce.leaves.cessionario_orgao_id",
+                                            "workforce.leaves.lotacao_setor_id"
                                     ))
                                     .actionDecisionPoint("homologar-afastamento", homologarActionDp)
                                     .tenantField("tenantId")
@@ -3963,7 +3965,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                         org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory.FILTER,
                                         bulkFilterEx.getCategory()
                                 );
-                                assertTrue(bulkFilterEx.getForbiddenAttributeIds().contains("ergon.afastamentos.cid_codigo"));
+                                assertTrue(bulkFilterEx.getForbiddenAttributeIds().contains("workforce.leaves.cid_codigo"));
 
                                 // P10.15-R02: groupByStats (grouping by allowed statusAfastamento, filtering by restricted cidCodigo),
                                 // filterOptions, and filterByCursor all block FilterDTO probing on restricted cidCodigo
@@ -4017,12 +4019,12 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .serviceKey(blueprint.serviceKey())
                                     .scalarFieldBinding(
                                             "resource.lotacaoSetorId",
-                                            "ergon.afastamentos.lotacao_setor_id",
+                                            "workforce.leaves.lotacao_setor_id",
                                             "lotacaoSetorId"
                                     )
                                     .resourceSensitiveFact(
                                             "resource.cidCodigo",
-                                            "ergon.afastamentos.cid_codigo",
+                                            "workforce.leaves.cid_codigo",
                                             org.praxisplatform.authz.contracts.context.FactValueType.STRING,
                                             "HEALTH_DATA",
                                             "OFFICIAL_HEALTH_EXPERTISE"
@@ -4032,15 +4034,15 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .cedenteCustody("cedenteOrgaoId", "subject.cedenteOrgaoIds")
                                     .cessionarioCustody("cessionarioOrgaoId", "subject.cessionarioOrgaoIds")
                                     .mandatoryScopeAnchorAttributeIds(Set.of(
-                                            "ergon.afastamentos.id",
-                                            "ergon.afastamentos.tenant_id",
-                                            "ergon.afastamentos.cedente_orgao_id",
-                                            "ergon.afastamentos.cessionario_orgao_id",
-                                            "ergon.afastamentos.lotacao_setor_id"
+                                            "workforce.leaves.id",
+                                            "workforce.leaves.tenant_id",
+                                            "workforce.leaves.cedente_orgao_id",
+                                            "workforce.leaves.cessionario_orgao_id",
+                                            "workforce.leaves.lotacao_setor_id"
                                     ))
                                     .workflowAction(
                                             "homologar-afastamento",
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .uiSurface("ficha-medica-360")
                                     .tenantField("tenantId")
@@ -4054,7 +4056,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "P10.15-R03: .uiSurface(...) must auto-synthesize surface DecisionPointDescriptor"
                     );
                     assertEquals(
-                            Set.of("ergon.afastamentos.status_afastamento"),
+                            Set.of("workforce.leaves.status_afastamento"),
                             zeroBoilerplateActionSurfaceSpec.operationModifiedAttributes().get("homologar-afastamento")
                     );
                     readinessReviewer.reviewGovernanceSpec(
@@ -4092,12 +4094,12 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .serviceKey(blueprint.serviceKey())
                                     .scalarFieldBinding(
                                             "resource.lotacaoSetorId",
-                                            "ergon.afastamentos.lotacao_setor_id",
+                                            "workforce.leaves.lotacao_setor_id",
                                             "lotacaoSetorId"
                                     )
                                     .resourceSensitiveFact(
                                             "resource.cidCodigo",
-                                            "ergon.afastamentos.cid_codigo",
+                                            "workforce.leaves.cid_codigo",
                                             org.praxisplatform.authz.contracts.context.FactValueType.STRING,
                                             "HEALTH_DATA",
                                             "OFFICIAL_HEALTH_EXPERTISE"
@@ -4107,23 +4109,23 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .cedenteCustody("cedenteOrgaoId", "subject.cedenteOrgaoIds")
                                     .cessionarioCustody("cessionarioOrgaoId", "subject.cessionarioOrgaoIds")
                                     .mandatoryScopeAnchorAttributeIds(Set.of(
-                                            "ergon.afastamentos.id",
-                                            "ergon.afastamentos.tenant_id",
-                                            "ergon.afastamentos.cedente_orgao_id",
-                                            "ergon.afastamentos.cessionario_orgao_id",
-                                            "ergon.afastamentos.lotacao_setor_id"
+                                            "workforce.leaves.id",
+                                            "workforce.leaves.tenant_id",
+                                            "workforce.leaves.cedente_orgao_id",
+                                            "workforce.leaves.cessionario_orgao_id",
+                                            "workforce.leaves.lotacao_setor_id"
                                     ))
                                     .workflowAction(
                                             "homologar-afastamento",
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .workflowAction(
                                             "designar-substituto",
-                                            Set.of("ergon.afastamentos.substituto_servidor_id")
+                                            Set.of("workforce.leaves.substituto_servidor_id")
                                     )
                                     .bulkWorkflowAction(
                                             "homologar-lote",
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .uiSurface("ficha-medica-360")
                                     .tenantField("tenantId")
@@ -4158,7 +4160,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             "rule-primary-org-scope",
                                             "resource.lotacaoSetorId",
                                             "subject.organizationUnitIds",
-                                            Map.of("ergon.afastamentos.cid_codigo", "***CID-RESTRITO***")
+                                            Map.of("workforce.leaves.cid_codigo", "***CID-RESTRITO***")
                                     )
                                     .addActionPolicy(
                                             p1016Spec,
@@ -4168,7 +4170,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                                     Map.of("var", "resource.lotacaoSetorId"),
                                                     Map.of("var", "subject.organizationUnitIds")
                                             )),
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .addActionPolicy(
                                             p1016Spec,
@@ -4178,7 +4180,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                                     Map.of("var", "resource.lotacaoSetorId"),
                                                     Map.of("var", "subject.organizationUnitIds")
                                             )),
-                                            Set.of("ergon.afastamentos.substituto_servidor_id")
+                                            Set.of("workforce.leaves.substituto_servidor_id")
                                     )
                                     .addBulkActionPolicy(
                                             p1016Spec,
@@ -4186,14 +4188,14 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             "rule-bulk-act-homologar",
                                             "resource.lotacaoSetorId",
                                             "subject.organizationUnitIds",
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     )
                                     .addSurfacePolicy(
                                             p1016Spec,
                                             "ficha-medica-360",
                                             "rule-surface-ficha-360",
                                             Map.of("!=", List.of(Map.of("var", "subject.principalId"), "")),
-                                            Map.of("ergon.afastamentos.cid_codigo", "***CID-RESTRITO-360***")
+                                            Map.of("workforce.leaves.cid_codigo", "***CID-RESTRITO-360***")
                                     )
                                     .build(introspectorBean);
 
@@ -4268,15 +4270,15 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .serviceKey(blueprint.serviceKey())
                                     .scalarFieldBinding(
                                             "resource.lotacaoSetorId",
-                                            "ergon.afastamentos.lotacao_setor_id",
+                                            "workforce.leaves.lotacao_setor_id",
                                             "lotacaoSetorId"
                                     )
                                     .mandatoryScopeAnchorAttributeIds(Set.of(
-                                            "ergon.afastamentos.id",
-                                            "ergon.afastamentos.tenant_id",
-                                            "ergon.afastamentos.cedente_orgao_id",
-                                            "ergon.afastamentos.cessionario_orgao_id",
-                                            "ergon.afastamentos.lotacao_setor_id"
+                                            "workforce.leaves.id",
+                                            "workforce.leaves.tenant_id",
+                                            "workforce.leaves.cedente_orgao_id",
+                                            "workforce.leaves.cessionario_orgao_id",
+                                            "workforce.leaves.lotacao_setor_id"
                                     ))
                                     .actionDecisionPoint("bulk-sem-qp", brokenBulkDp)
                                     .tenantField("tenantId")
@@ -4351,7 +4353,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .assertDeniedCategory("DUAL_SCOPE_CUSTODY_DENIED");
                     assertEquals("CEDENTE_ONLY", cedenteDesignarOutcome.dualScopeCustodyRole());
                     assertEquals(
-                            List.of("ergon.afastamentos.substituto_servidor_id"),
+                            List.of("workforce.leaves.substituto_servidor_id"),
                             cedenteDesignarOutcome.forbiddenWriteAttributeIds(),
                             "P10.16-B: AvailabilityDecision.metadata() must include forbiddenWriteAttributeIds on dual-scope write denial"
                     );
@@ -4387,8 +4389,8 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     .expectItemAvailability("Item #102 fora de lotacao negado pelo OPA", pureCedenteCaller, "view", simEntity102, false, "policy-gate-denied")
                                     .expectItemAvailability("Item #103 outro tenant negado por hard-scope", pureCedenteCaller, "view", simEntity103, false, "hard-scope-tenant-mismatch")
                                     .expectCollectionAvailability("Cedente pode acionar homologar-lote na colecao", pureCedenteCaller, "homologar-lote", true, null)
-                                    .expectTargetReadAllowed("Leitura de #101 mascara cidCodigo", pureCedenteCaller, simEntity101, rawDto101, Set.of("ergon.afastamentos.cid_codigo"))
-                                    .expectSurfaceReadAllowed("Surface ficha-medica-360 mascara cidCodigo", pureCedenteCaller, "ficha-medica-360", simEntity101, rawDto101, Set.of("ergon.afastamentos.cid_codigo"))
+                                    .expectTargetReadAllowed("Leitura de #101 mascara cidCodigo", pureCedenteCaller, simEntity101, rawDto101, Set.of("workforce.leaves.cid_codigo"))
+                                    .expectSurfaceReadAllowed("Surface ficha-medica-360 mascara cidCodigo", pureCedenteCaller, "ficha-medica-360", simEntity101, rawDto101, Set.of("workforce.leaves.cid_codigo"))
                                     .verifyAll();
                     assertEquals(11, matrixReport.totalScenarios());
                     assertTrue(matrixReport.allPassed());
@@ -4396,7 +4398,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "***CID-RESTRITO-360***",
                             simulationHarness.simulateSurfaceRead(pureCedenteCaller, "ficha-medica-360", simEntity101, rawDto101)
                                     .assertAllowed()
-                                    .assertAttributeMasked("ergon.afastamentos.cid_codigo")
+                                    .assertAttributeMasked("workforce.leaves.cid_codigo")
                                     .maskedResponse()
                                     .cidCodigo(),
                             "P10.16-C: simulateSurfaceRead must apply surface-specific mask replacement '***CID-RESTRITO-360***'"
@@ -4448,7 +4450,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                             "rule-invalid-bulk",
                                             "resource.lotacaoSetorId",
                                             "subject.organizationUnitIds",
-                                            Set.of("ergon.afastamentos.status_afastamento")
+                                            Set.of("workforce.leaves.status_afastamento")
                                     ),
                             "P10.16-R03: addBulkActionPolicy must reject an action registered via item-only .workflowAction(...)"
                     );
@@ -4514,9 +4516,9 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             .assertAllowed()
                             .assertAttributeStripped("version")
                             .assertAttributeStripped("cidCodigo")
-                            .assertAttributeStripped("ergon.afastamentos.cid_codigo")
+                            .assertAttributeStripped("workforce.leaves.cid_codigo")
                             .assertAttributeStripped("substitutoServidorId")
-                            .assertAttributeStripped("ergon.afastamentos.substituto_servidor_id")
+                            .assertAttributeStripped("workforce.leaves.substituto_servidor_id")
                             .assertAttributePreserved("orgCedenteId")
                             .assertAttributePreserved("orgCessionariaId")
                             .assertAttributePreserved("lotacaoSetorId")
@@ -4552,7 +4554,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             .assertRowCount(1) // Only simEntity101 is in pureCedenteCaller's organizational scope!
                             .assertFieldExcluded("orgCedenteId") // exportable = false inherited from P102AfastamentoJpaEntity.cedenteOrgaoId
                             .assertFieldExcluded("cidCodigo") // LGPD_SENSITIVE_DATA has exportable = false by default
-                            .assertAttributeMasked("ergon.afastamentos.cid_codigo");
+                            .assertAttributeMasked("workforce.leaves.cid_codigo");
                     assertFalse(exportSimOutcome.exportedRows().getFirst().containsKey("orgCedenteId"));
                     assertFalse(exportSimOutcome.exportedRows().getFirst().containsKey("cidCodigo"));
                     assertEquals("HOMOLOGADO", exportSimOutcome.exportedRows().getFirst().get("statusAfastamento"));
@@ -4564,7 +4566,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     new DetachedDtoMaskingProcessor(),
                                     p1016Service.getGovernanceContract(),
                                     List::of,
-                                    () -> Set.of("ergon.afastamentos.substituto_servidor_id")
+                                    () -> Set.of("workforce.leaves.substituto_servidor_id")
                             );
                     var dynamicExportResult = dynamicDeniedExportExecutor.export(
                             exportReq,
@@ -4638,7 +4640,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     );
                     detSimOutcome
                             .assertAllowed()
-                            .assertAttributeMasked("ergon.afastamentos.cid_codigo")
+                            .assertAttributeMasked("workforce.leaves.cid_codigo")
                             .assertKeyPresentWithValue("cidCodigo", "***CID-RESTRITO***")
                             .assertKeyPresentWithValue("diasCalculados", 15);
 
@@ -4659,7 +4661,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             .assertAllowed()
                             .assertColumnAllowed("statusAfastamento")
                             .assertAttributeSuppressed("cidCodigo")
-                            .assertAttributeSuppressed("ergon.afastamentos.cid_codigo");
+                            .assertAttributeSuppressed("workforce.leaves.cid_codigo");
                     assertFalse(aiSimOutcome.detachedPayload().containsKey("cidCodigo"),
                             "P10.18-A: AI context projection must completely suppress LGPD_SENSITIVE_DATA / aiAllowed=false attributes");
 
@@ -4679,12 +4681,12 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     simulationHarness.simulateQueryFieldUse(
                             pureCedenteCaller,
                             Map.of(FieldUseCategory.FILTER, Set.of("cidCodigo"))
-                    ).assertViolated(FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo");
+                    ).assertViolated(FieldUseCategory.FILTER, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateQueryFieldUse(
                             pureCedenteCaller,
                             Map.of(FieldUseCategory.SORT, Set.of("cidCodigo"))
-                    ).assertViolated(FieldUseCategory.SORT, "ergon.afastamentos.cid_codigo");
+                    ).assertViolated(FieldUseCategory.SORT, "workforce.leaves.cid_codigo");
 
                     // Simulate FilterDTO + Sort automatic extraction via simulateFilterAndSortFieldUse
                     AfastamentoFilterDTO allowedFilterDto = new AfastamentoFilterDTO();
@@ -4701,7 +4703,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             pureCedenteCaller,
                             deniedFilterDto,
                             org.springframework.data.domain.Sort.unsorted()
-                    ).assertViolated(FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo");
+                    ).assertViolated(FieldUseCategory.FILTER, "workforce.leaves.cid_codigo");
 
                     // Verify MatrixRunner.expectReactiveDetermination, expectAiContextProjection & expectQueryFieldUse
                     simulationHarness.matrix()
@@ -4711,7 +4713,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     simEntity101,
                                     rawDeterminationMap,
                                     true,
-                                    Set.of("ergon.afastamentos.cid_codigo")
+                                    Set.of("workforce.leaves.cid_codigo")
                             )
                             .expectReactiveDetermination(
                                     "Determinação reativa em 102 fora de escopo negada",
@@ -4727,7 +4729,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     simEntity101,
                                     rawDto101,
                                     true,
-                                    Set.of("cidCodigo", "ergon.afastamentos.cid_codigo")
+                                    Set.of("cidCodigo", "workforce.leaves.cid_codigo")
                             )
                             .expectQueryFieldUse(
                                     "Filtro em statusAfastamento permitido",
@@ -4743,7 +4745,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     Map.of(FieldUseCategory.FILTER, Set.of("cidCodigo")),
                                     false,
                                     FieldUseCategory.FILTER,
-                                    "ergon.afastamentos.cid_codigo"
+                                    "workforce.leaves.cid_codigo"
                             )
                             .verifyAll();
 
@@ -4754,7 +4756,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     simulationHarness.simulateGroupByStats(pureCedenteCaller, "statusAfastamento", Set.of())
                             .assertAllowed();
                     simulationHarness.simulateGroupByStats(pureCedenteCaller, "cidCodigo", Set.of())
-                            .assertViolated(FieldUseCategory.GROUP, "ergon.afastamentos.cid_codigo");
+                            .assertViolated(FieldUseCategory.GROUP, "workforce.leaves.cid_codigo");
 
                     StatsFieldRegistry rawStatsReg = StatsFieldRegistry.builder()
                             .categoricalGroupByBucket("statusAfastamento", "statusAfastamento")
@@ -4794,28 +4796,28 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             pureCedenteCaller,
                             simEntity101,
                             new AfastamentoAnnotatedUpdateDTO(null, "J12")
-                    ).assertAllowed().assertAttributeModified("ergon.afastamentos.cid_codigo");
+                    ).assertAllowed().assertAttributeModified("workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateUpdateMutation(
                             pureCedenteCaller,
                             simEntity101,
                             new AfastamentoAnnotatedUpdateDTO(7777L, null)
                     ).assertDenied("dual-scope-custody-denied")
-                            .assertForbiddenWriteAttribute("ergon.afastamentos.substituto_servidor_id");
+                            .assertForbiddenWriteAttribute("workforce.leaves.substituto_servidor_id");
 
                     // 2) Pure Cessionário can update substitutoServidorId, but CANNOT update cidCodigo or DELETE entity
                     simulationHarness.simulateUpdateMutation(
                             pureCessionarioCaller,
                             simEntity101,
                             new AfastamentoAnnotatedUpdateDTO(7777L, null)
-                    ).assertAllowed().assertAttributeModified("ergon.afastamentos.substituto_servidor_id");
+                    ).assertAllowed().assertAttributeModified("workforce.leaves.substituto_servidor_id");
 
                     simulationHarness.simulateUpdateMutation(
                             pureCessionarioCaller,
                             simEntity101,
                             new AfastamentoAnnotatedUpdateDTO(null, "J99")
                     ).assertDenied("dual-scope-custody-denied")
-                            .assertForbiddenWriteAttribute("ergon.afastamentos.cid_codigo");
+                            .assertForbiddenWriteAttribute("workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateDeleteMutation(pureCedenteCaller, simEntity101)
                             .assertAllowed();
@@ -4837,7 +4839,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "homologar-afastamento",
                             simEntity101,
                             null
-                    ).assertAllowed().assertAttributeModified("ergon.afastamentos.status_afastamento");
+                    ).assertAllowed().assertAttributeModified("workforce.leaves.status_afastamento");
 
                     simulationHarness.simulateItemCommandMutation(
                             pureCedenteCaller,
@@ -4845,7 +4847,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             simEntity101,
                             new DesignarSubstitutoCommandDTO(8888L)
                     ).assertDenied("dual-scope-custody-denied")
-                            .assertForbiddenWriteAttribute("ergon.afastamentos.substituto_servidor_id");
+                            .assertForbiddenWriteAttribute("workforce.leaves.substituto_servidor_id");
 
                     // 5) Full MatrixRunner verification for P10.19-A & P10.19-B
                     simulationHarness.matrix()
@@ -4865,7 +4867,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     Set.of(),
                                     false,
                                     FieldUseCategory.GROUP,
-                                    "ergon.afastamentos.cid_codigo"
+                                    "workforce.leaves.cid_codigo"
                             )
                             .expectOptionSource(
                                     "OptionSource admite apenas item 101 em escopo",
@@ -4939,17 +4941,17 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     simulationHarness.simulateGroupByStats(pureCedenteCaller, "statusAfastamento", Set.of(), validFilterDto)
                             .assertAllowed();
                     simulationHarness.simulateGroupByStats(pureCedenteCaller, "statusAfastamento", Set.of(), restrictedCidFilterDto)
-                            .assertViolated(FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo");
+                            .assertViolated(FieldUseCategory.FILTER, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateTimeSeriesStats(pureCedenteCaller, "statusAfastamento", Set.of(), validFilterDto)
                             .assertAllowed();
                     simulationHarness.simulateTimeSeriesStats(pureCedenteCaller, "cidCodigo", Set.of(), validFilterDto)
-                            .assertViolated(FieldUseCategory.GROUP, "ergon.afastamentos.cid_codigo");
+                            .assertViolated(FieldUseCategory.GROUP, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateDistributionStats(pureCedenteCaller, "statusAfastamento", null, validFilterDto)
                             .assertAllowed();
                     simulationHarness.simulateDistributionStats(pureCedenteCaller, "statusAfastamento", "cidCodigo", validFilterDto)
-                            .assertViolated(FieldUseCategory.AGGREGATE, "ergon.afastamentos.cid_codigo");
+                            .assertViolated(FieldUseCategory.AGGREGATE, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateComparisonStats(
                             pureCedenteCaller,
@@ -4965,7 +4967,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             Set.of(),
                             validFilterDto,
                             restrictedCidFilterDto
-                    ).assertViolated(FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo");
+                    ).assertViolated(FieldUseCategory.FILTER, "workforce.leaves.cid_codigo");
 
                     // P10.20-B: Bulk Cohort Simulations (BulkUpdate, BulkPerItemUpdate, BulkDelete, BulkCommand)
                     // 1) Uniform Bulk Update Cohort: [101L (in-scope), 102L (out-of-scope), 103L (cross-tenant)]
@@ -5057,7 +5059,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     validFilterDto,
                                     false,
                                     FieldUseCategory.AGGREGATE,
-                                    "ergon.afastamentos.cid_codigo"
+                                    "workforce.leaves.cid_codigo"
                             )
                             .expectComparisonStats(
                                     "Comparison bloqueado quando filtro de comparação usa cidCodigo",
@@ -5068,7 +5070,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     restrictedCidFilterDto,
                                     false,
                                     FieldUseCategory.FILTER,
-                                    "ergon.afastamentos.cid_codigo"
+                                    "workforce.leaves.cid_codigo"
                             )
                             .expectBulkUpdateCohort(
                                     "BulkUpdate PER_ITEM confirma 101L e rejeita 102L",
@@ -5391,7 +5393,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                     )
                             .assertAllowed()
                             .assertKeyPresentWithValue("statusAfastamento", "HOMOLOGADO")
-                            .assertAttributeMasked("ergon.afastamentos.cid_codigo");
+                            .assertAttributeMasked("workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateDraftReactiveDetermination(
                             spoofedHeadersCaller,
@@ -5408,7 +5410,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     simEntity101,
                                     rawSimDtoMapper.apply(simEntity101),
                                     true,
-                                    Set.of("ergon.afastamentos.cid_codigo")
+                                    Set.of("workforce.leaves.cid_codigo")
                             )
                             .expectReactiveDetermination(
                                     "ReactiveDetermination item mascara cidCodigo",
@@ -5417,7 +5419,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     simEntity101,
                                     Map.of("statusAfastamento", "HOMOLOGADO", "cidCodigo", "J11"),
                                     true,
-                                    Set.of("ergon.afastamentos.cid_codigo")
+                                    Set.of("workforce.leaves.cid_codigo")
                             )
                             .expectDraftReactiveDetermination(
                                     "DraftReactiveDetermination mascara cidCodigo",
@@ -5426,7 +5428,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                                     Map.of("lotacaoSetorId", 100L, "statusAfastamento", "HOMOLOGADO"),
                                     Map.of("statusAfastamento", "HOMOLOGADO", "cidCodigo", "J11"),
                                     true,
-                                    Set.of("ergon.afastamentos.cid_codigo")
+                                    Set.of("workforce.leaves.cid_codigo")
                             )
                             .verifyAll();
 
@@ -5519,7 +5521,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             null,
                             10
                     )
-                            .assertDenied(FieldUseCategory.SORT, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.SORT, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateCursorFilter(
                             spoofedHeadersCaller,
@@ -5689,7 +5691,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             Set.of("cidCodigo"),
                             101L
                     )
-                            .assertDenied(FieldUseCategory.SORT, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.SORT, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateFindAllById(
                             pureCedenteCaller,
@@ -5819,7 +5821,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "porCidSimbolico",
                             null
                     )
-                            .assertDenied(FieldUseCategory.SORT, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.SORT, "workforce.leaves.cid_codigo");
 
                     simulationHarness.simulateOptionSource(
                             pureCedenteCaller,
@@ -5832,7 +5834,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "statusAfastamento:asc",
                             "J11"
                     )
-                            .assertDenied(FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.FILTER, "workforce.leaves.cid_codigo");
 
                     simulationHarness.matrix()
                             .expectOptionSource(
@@ -5952,7 +5954,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "porStatus",
                             "J11"
                     )
-                            .assertDenied(FieldUseCategory.FILTER, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.FILTER, "workforce.leaves.cid_codigo");
 
                     // P10.26-B: Symbolic sortKey="label" translates to labelPropertyPath (cidCodigo) and blocks SORT
                     simulationHarness.simulateOptionSource(
@@ -5966,7 +5968,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             "label:asc",
                             null
                     )
-                            .assertDenied(FieldUseCategory.SORT, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.SORT, "workforce.leaves.cid_codigo");
 
                     // P10.26-B: Implicit defaultSort ("porCidSimbolico" -> "cidCodigo") blocks FILTER operation when sortKey is null
                     simulationHarness.simulateOptionSource(
@@ -5980,7 +5982,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
                             null,
                             null
                     )
-                            .assertDenied(FieldUseCategory.SORT, "ergon.afastamentos.cid_codigo");
+                            .assertDenied(FieldUseCategory.SORT, "workforce.leaves.cid_codigo");
 
                     // P10.26-B: Uniform header anti-spoofing across Analytics, CollectionExport, ReactiveDetermination, and AiContextProjection
                     assertEquals(
@@ -6010,13 +6012,13 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
             Long,
             AfastamentoFilterDTO> {
 
-        private final AfastamentoAuthzPilotBlueprint blueprint;
+        private final WorkforceLeaveAuthzPilotBlueprint blueprint;
         private final EntityManager em;
 
         ConciseAfastamentoRadarReadOnlyService(
                 BaseCrudRepository<P102AfastamentoJpaEntity, Long> repository,
                 AuthzGovernedResourceServiceSupport serviceSupport,
-                AfastamentoAuthzPilotBlueprint blueprint,
+                WorkforceLeaveAuthzPilotBlueprint blueprint,
                 JpaDataScopeAdapter jpaAdapter,
                 JpaCriteriaDataScopeTranslator criteriaTranslator,
                 EntityManager em
@@ -6125,7 +6127,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
             AfastamentoAnnotatedCreateDTO,
             AfastamentoAnnotatedUpdateDTO> {
 
-        private final AfastamentoAuthzPilotBlueprint blueprint;
+        private final WorkforceLeaveAuthzPilotBlueprint blueprint;
         private final EntityManager em;
         final AtomicBoolean callerIsCedente = new AtomicBoolean(false);
         final java.util.List<String> executionTrace = new java.util.ArrayList<>();
@@ -6133,7 +6135,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         ConciseAfastamentoGovernedService(
                 BaseCrudRepository<P102AfastamentoJpaEntity, Long> repository,
                 AuthzGovernedResourceServiceSupport serviceSupport,
-                AfastamentoAuthzPilotBlueprint blueprint,
+                WorkforceLeaveAuthzPilotBlueprint blueprint,
                 JpaDataScopeAdapter jpaAdapter,
                 JpaCriteriaDataScopeTranslator criteriaTranslator,
                 EntityManager em
@@ -6251,11 +6253,11 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
         @Override
         protected Set<String> resolveMandatoryScopeAnchorAttributeIds() {
             return Set.of(
-                    "ergon.afastamentos.id",
-                    "ergon.afastamentos.tenant_id",
-                    "ergon.afastamentos.cedente_orgao_id",
-                    "ergon.afastamentos.cessionario_orgao_id",
-                    "ergon.afastamentos.lotacao_setor_id"
+                    "workforce.leaves.id",
+                    "workforce.leaves.tenant_id",
+                    "workforce.leaves.cedente_orgao_id",
+                    "workforce.leaves.cessionario_orgao_id",
+                    "workforce.leaves.lotacao_setor_id"
             );
         }
 
@@ -6297,7 +6299,7 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
 
     /** UpdateDTO declaring contradictory PUBLIC governance on restricted cidCodigo (for AUTHZ-HOST-009 test). */
     record ContradictoryGovernanceUpdateDTO(
-            @DomainLineage(attributeId = "ergon.afastamentos.cid_codigo")
+            @DomainLineage(attributeId = "workforce.leaves.cid_codigo")
             @DomainGovernance(
                     classification = DomainClassification.PUBLIC,
                     dataCategory = DomainDataCategory.OPERATIONAL,
@@ -6309,9 +6311,9 @@ class P102RealAbstractBaseResourceServiceIntegrationTest {
     /** UpdateDTO declaring a DERIVED field from restricted cidCodigo that widens exportability/classification (for P10.14-R05 test). */
     record DerivedWideningUpdateDTO(
             @DomainLineage(
-                    attributeId = "ergon.afastamentos.resumo_cid_publico",
+                    attributeId = "workforce.leaves.resumo_cid_publico",
                     transformation = org.praxisplatform.uischema.annotation.DomainLineageTransformation.DERIVED,
-                    sourcePaths = {"ergon.afastamentos.cid_codigo"}
+                    sourcePaths = {"workforce.leaves.cid_codigo"}
             )
             @DomainGovernance(
                     classification = DomainClassification.PUBLIC,

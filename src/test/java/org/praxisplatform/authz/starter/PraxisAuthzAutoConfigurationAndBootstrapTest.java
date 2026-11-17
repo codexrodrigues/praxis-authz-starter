@@ -24,7 +24,7 @@ import org.praxisplatform.authz.contracts.envelope.ProviderEvaluationEnvelope;
 import org.praxisplatform.authz.enforcement.pipeline.AuthorizationProviderPort;
 import org.praxisplatform.authz.enforcement.pipeline.EnforcementPipelineExecutor;
 import org.praxisplatform.authz.opa.client.OpaClientTransport;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -40,7 +40,7 @@ class PraxisAuthzAutoConfigurationAndBootstrapTest {
 
     @Test
     void cc08_p20_autoConfigurationStartsCleanlyWithValidPilotCoordinatesAndReportsHealthUp() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         contextRunner
                 .withBean(OpaClientTransport.class, blueprint::localOpaTransport)
@@ -66,7 +66,7 @@ class PraxisAuthzAutoConfigurationAndBootstrapTest {
 
     @Test
     void p20_startupFailsClosedWhenProviderOrBindingsAreMissingOrWhenTwoProvidersCompete() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         // 1. P20: Missing provider -> startup fails closed with AUTHZ_BOOTSTRAP_MISSING_PROVIDER
         contextRunner
@@ -95,7 +95,7 @@ class PraxisAuthzAutoConfigurationAndBootstrapTest {
 
     @Test
     void p39_p48_p59_startupFailsClosedOnImpactGraphIncompletenessOrContractDigestDrift() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         ImpactGraphBaseline incompleteImpact = new ImpactGraphBaseline(
                 "imp-incomplete",
@@ -116,7 +116,7 @@ class PraxisAuthzAutoConfigurationAndBootstrapTest {
                 Map.of(
                         blueprint.decisionPoint().identity().pointKey(),
                         blueprint.enforcementBinding(),
-                        "resource-operation:praxis-ergon-showcase:orphan.resource:read",
+                        "resource-operation:praxis-workforce-showcase:orphan.resource:read",
                         blueprint.enforcementBinding() // P4-R01: orphan binding not in manifest!
                 )
         );
@@ -153,7 +153,7 @@ class PraxisAuthzAutoConfigurationAndBootstrapTest {
 
     @Test
     void p4r1_p4r4_httpTransportPropertyAutoWiresHttpClientOpaTransportAndManifestMaskStrategyIsVerifiedAgainstRegistry() {
-        AfastamentoAuthzPilotBlueprint blueprint = AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint();
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
 
         // 1. P4-R1: praxis.authz.opa.http-transport-enabled=true registers HttpClientOpaTransport out-of-the-box
         contextRunner

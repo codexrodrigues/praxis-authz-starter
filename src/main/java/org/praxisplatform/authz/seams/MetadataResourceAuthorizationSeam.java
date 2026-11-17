@@ -642,9 +642,9 @@ public final class MetadataResourceAuthorizationSeam {
                 if (operationVerb != null
                         && operationVerb.toUpperCase(java.util.Locale.ROOT).startsWith("DELETE")
                         && !callerMatchesCedente
-                        && !dualScopeSpec.cedenteExclusiveWriteAttributes().isEmpty()) {
+                        && !dualScopeSpec.originExclusiveWriteAttributes().isEmpty()) {
                     throw new FieldWriteViolationException(
-                            dualScopeSpec.cedenteExclusiveWriteAttributes(),
+                            dualScopeSpec.originExclusiveWriteAttributes(),
                             "AUTHZ_DUAL_SCOPE_DELETE_REQUIRES_CEDENTE:" + dualScopeSpec.mode(),
                             "Deleting an entity with cedente-exclusive attributes requires origin/cedente custody (R-07/P17)");
                 }
@@ -1124,7 +1124,7 @@ public final class MetadataResourceAuthorizationSeam {
         if (dualScopeSpec != null) {
             if (normalizedOp.startsWith("delete")
                     && !callerMatchesCedente
-                    && !dualScopeSpec.cedenteExclusiveWriteAttributes().isEmpty()) {
+                    && !dualScopeSpec.originExclusiveWriteAttributes().isEmpty()) {
                 return new OperationAvailabilityEvaluation(
                         evaluateAdvisoryAvailability(pointKey, false, "dual-scope-precheck"),
                         "dual-scope-cedente-custody-required",
@@ -1132,7 +1132,7 @@ public final class MetadataResourceAuthorizationSeam {
                         scopeLabel,
                         OperationAvailabilityEvaluation.classifyDenialCategory("dual-scope-cedente-custody-required"),
                         custodyRole,
-                        List.copyOf(dualScopeSpec.cedenteExclusiveWriteAttributes()),
+                        List.copyOf(dualScopeSpec.originExclusiveWriteAttributes()),
                         List.of()
                 );
             }

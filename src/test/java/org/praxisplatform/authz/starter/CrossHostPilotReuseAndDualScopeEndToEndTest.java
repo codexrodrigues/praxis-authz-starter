@@ -49,13 +49,13 @@ import org.praxisplatform.authz.export.GovernedCollectionExportGuard;
 import org.praxisplatform.authz.export.GovernedCollectionExportGuard.ExportFormat;
 import org.praxisplatform.authz.export.GovernedCollectionExportGuard.SanitizedExportArtifact;
 import org.praxisplatform.authz.opa.client.OpaClientTransport;
-import org.praxisplatform.authz.pilot.AfastamentoAuthzPilotBlueprint;
+import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
- * End-to-end conformance test proving that both the Ergon {@code Afastamento} showcase pilot and a
- * second non-Ergon host ({@code P22}) execute the complete Spring Boot auto-configured pipeline
+ * End-to-end conformance test proving that both the Workforce {@code Afastamento} showcase pilot and a
+ * second non-Workforce host ({@code P22}) execute the complete Spring Boot auto-configured pipeline
  * (SEARCH pushdown, detached masking without entity mutation {@code P40}, and dual-scope metadata).
  */
 class CrossHostPilotReuseAndDualScopeEndToEndTest {
@@ -64,15 +64,15 @@ class CrossHostPilotReuseAndDualScopeEndToEndTest {
             .withConfiguration(AutoConfigurations.of(PraxisAuthzAutoConfiguration.class));
 
     @Test
-    void p22_p40_ergonPilotAndSecondNonErgonHostExecuteFullAutoConfiguredPipeline() {
+    void p22_p40_workforcePilotAndSecondHostExecuteFullAutoConfiguredPipeline() {
         verifyHostBlueprintExecution(
-                AfastamentoAuthzPilotBlueprint.createErgonAfastamentoBlueprint(),
+                WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint(),
                 "vinculo.lotacao.id"
         );
 
-        // P22: Second host uses the exact same starter and contracts without any Ergon classes or conventions!
+        // P22: Second host uses the exact same starter and contracts without any Workforce classes or conventions!
         verifyHostBlueprintExecution(
-                AfastamentoAuthzPilotBlueprint.createHostBlueprint(
+                WorkforceLeaveAuthzPilotBlueprint.createHostBlueprint(
                         "praxis-fleet-service",
                         "fleet.vehicle-assignments",
                         "fleet.assignments"
@@ -82,7 +82,7 @@ class CrossHostPilotReuseAndDualScopeEndToEndTest {
     }
 
     private void verifyHostBlueprintExecution(
-            AfastamentoAuthzPilotBlueprint blueprint,
+            WorkforceLeaveAuthzPilotBlueprint blueprint,
             String jpaColumnPath
     ) {
         TrustedFactSource extractSource = new TrustedFactSource() {

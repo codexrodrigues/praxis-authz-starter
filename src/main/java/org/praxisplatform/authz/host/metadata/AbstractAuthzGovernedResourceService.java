@@ -307,7 +307,7 @@ public abstract class AbstractAuthzGovernedResourceService<
     /** Returns the mandatory host-level {@link ResourceFilterAccessScope} (tenant/org hard scope). */
     protected ResourceFilterAccessScope<E> resolveHardScope() {
         if (governanceSpec != null && callerContextProvider != null) {
-            return governanceSpec.buildHardScope(callerContextProvider.currentCallerContext().tenantId());
+            return governanceSpec.buildHardScope(callerContextProvider.currentCallerContext());
         }
         throw new IllegalStateException(
                 "Override resolveHardScope() or supply an AuthzResourceGovernanceSpec + AuthzCallerContextProvider");
@@ -316,6 +316,9 @@ public abstract class AbstractAuthzGovernedResourceService<
     /** Returns the mandatory host-level JPQL hard-scope clause (e.g. {@code "e.tenantId = :__praxis_hard_tenant_id"}). */
     protected String resolveHardScopeJpql() {
         if (governanceSpec != null) {
+            if (callerContextProvider != null) {
+                return governanceSpec.buildHardScopeJpql(callerContextProvider.currentCallerContext());
+            }
             return governanceSpec.buildHardScopeJpql();
         }
         throw new IllegalStateException(
@@ -325,7 +328,7 @@ public abstract class AbstractAuthzGovernedResourceService<
     /** Returns the mandatory host-level JPQL hard-scope parameters. */
     protected Map<String, Object> resolveHardScopeParams() {
         if (governanceSpec != null && callerContextProvider != null) {
-            return governanceSpec.buildHardScopeParams(callerContextProvider.currentCallerContext().tenantId());
+            return governanceSpec.buildHardScopeParams(callerContextProvider.currentCallerContext());
         }
         throw new IllegalStateException(
                 "Override resolveHardScopeParams() or supply an AuthzResourceGovernanceSpec + AuthzCallerContextProvider");
@@ -362,18 +365,46 @@ public abstract class AbstractAuthzGovernedResourceService<
         return null;
     }
 
-    /** Returns {@code true} when the current caller holds {@code Cedente} (origin) custody over {@code entity}. */
+    /**
+     * Returns {@code true} when the current caller holds origin custody over {@code entity}.
+     * Delegates to {@link #isCallerCedente(Object)} by default so legacy overrides remain honored.
+     */
+    @SuppressWarnings("deprecation")
+    protected boolean isCallerOrigin(E entity) {
+        return isCallerCedente(entity);
+    }
+
+    /**
+     * Returns {@code true} when the current caller holds destination custody over {@code entity}.
+     * Delegates to {@link #isCallerCessionario(Object)} by default so legacy overrides remain honored.
+     */
+    @SuppressWarnings("deprecation")
+    protected boolean isCallerDestination(E entity) {
+        return isCallerCessionario(entity);
+    }
+
+    /**
+     * Legacy custody hook preserved for backward compatibility.
+     *
+     * @deprecated Override or call {@link #isCallerOrigin(Object)}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     protected boolean isCallerCedente(E entity) {
         if (governanceSpec != null && callerContextProvider != null) {
-            return governanceSpec.isCallerCedente(entity, callerContextProvider.currentCallerContext());
+            return governanceSpec.isCallerOrigin(entity, callerContextProvider.currentCallerContext());
         }
         return true;
     }
 
-    /** Returns {@code true} when the current caller holds {@code Cessionário} (destination) custody over {@code entity}. */
+    /**
+     * Legacy custody hook preserved for backward compatibility.
+     *
+     * @deprecated Override or call {@link #isCallerDestination(Object)}.
+     */
+    @Deprecated(since = "0.1.0-beta.2")
     protected boolean isCallerCessionario(E entity) {
         if (governanceSpec != null && callerContextProvider != null) {
-            return governanceSpec.isCallerCessionario(entity, callerContextProvider.currentCallerContext());
+            return governanceSpec.isCallerDestination(entity, callerContextProvider.currentCallerContext());
         }
         return true;
     }
@@ -611,45 +642,44 @@ public abstract class AbstractAuthzGovernedResourceService<
                 governanceSpec.operationModifiedAttributes(),
                 () -> {
                     AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-                    boolean collectionCedente = callerCtx.callerMatchesCedente() != null
-                            ? callerCtx.callerMatchesCedente()
-                            : (governanceSpec.hasDeclarativeCedenteCustody()
-                                    ? governanceSpec.isCallerCedente(null, callerCtx)
-                                    : isCallerCedente(null));
-                    boolean collectionCessionario = callerCtx.callerMatchesCessionario() != null
-                            ? callerCtx.callerMatchesCessionario()
-                            : (governanceSpec.hasDeclarativeCessionarioCustody()
-                                    ? governanceSpec.isCallerCessionario(null, callerCtx)
-                                    : isCallerCessionario(null));
-                    return new AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext(
-                            callerCtx.subjectAndEnvironmentFacts(),
-                            callerCtx.factStatuses(),
-                            collectionCedente,
-                            collectionCessionario,
-                            callerCtx.tenantId()
+                    boolean collectionOrigin = callerCtx.callerMatchesOrigin() != null
+                            ? callerCtx.callerMatchesOrigin()
+                            : (governanceSpec.hasDeclarativeOriginCustody()
+                                    ? governanceSpec.isCallerOrigin(null, callerCtx)
+                                    : isCallerOrigin(null));
+                    boolean collectionDestination = callerCtx.callerMatchesDestination() != null
+                            ? callerCtx.callerMatchesDestination()
+                            : (governanceSpec.hasDeclarativeDestinationCustody()
+                                    ? governanceSpec.isCallerDestination(null, callerCtx)
+                                    : isCallerDestination(null));
+                    return AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext.fromGovernanceSpec(
+                            governanceSpec,
+                            callerCtx,
+                            collectionOrigin,
+                            collectionDestination
                     );
                 },
                 governanceSpec::extractSnapshotTargetFacts,
                 this::resolveItemSnapshotForAvailability,
                 (callerAvailabilityCtx, snapshot) -> {
                     AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-                    if (callerCtx.callerMatchesCedente() != null) {
-                        return callerCtx.callerMatchesCedente();
+                    if (callerCtx.callerMatchesOrigin() != null) {
+                        return callerCtx.callerMatchesOrigin();
                     }
-                    if (governanceSpec.hasDeclarativeCedenteCustody()) {
-                        return governanceSpec.isCallerCedenteForSnapshot(snapshot, callerCtx);
+                    if (governanceSpec.hasDeclarativeOriginCustody()) {
+                        return governanceSpec.isCallerOriginForSnapshot(snapshot, callerCtx);
                     }
-                    return isCallerCedente(null);
+                    return isCallerOrigin(null);
                 },
                 (callerAvailabilityCtx, snapshot) -> {
                     AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-                    if (callerCtx.callerMatchesCessionario() != null) {
-                        return callerCtx.callerMatchesCessionario();
+                    if (callerCtx.callerMatchesDestination() != null) {
+                        return callerCtx.callerMatchesDestination();
                     }
-                    if (governanceSpec.hasDeclarativeCessionarioCustody()) {
-                        return governanceSpec.isCallerCessionarioForSnapshot(snapshot, callerCtx);
+                    if (governanceSpec.hasDeclarativeDestinationCustody()) {
+                        return governanceSpec.isCallerDestinationForSnapshot(snapshot, callerCtx);
                     }
-                    return isCallerCessionario(null);
+                    return isCallerDestination(null);
                 },
                 governanceSpec.actionDecisionPoints(),
                 governanceSpec.surfaceDecisionPoints()
@@ -820,8 +850,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 resolveTechnicalConcurrencyPointers(),
                 resolveMandatoryScopeAnchorAttributeIds(),
                 resolveDualScopeDelegationSpec(),
-                isCallerCedente(existing),
-                isCallerCessionario(existing),
+                isCallerOrigin(existing),
+                isCallerDestination(existing),
                 mergedFacts,
                 resolveFactStatuses(mergedFacts),
                 this
@@ -1383,17 +1413,17 @@ public abstract class AbstractAuthzGovernedResourceService<
                     );
                 }
                 DualScopeDelegationSpec dualScope = resolveDualScopeDelegationSpec();
-                boolean callerCedente = isCallerCedente(sourceEntity);
-                boolean callerCessionario = isCallerCessionario(sourceEntity);
-                if (dualScope != null && !callerCedente && !callerCessionario) {
-                    throw new SecurityException("AUTHZ_DUPLICATE_DRAFT_CUSTODY_DENIED: Caller holds neither Cedente nor Cessionário custody on source record '"
+                boolean callerOrigin = isCallerOrigin(sourceEntity);
+                boolean callerDestination = isCallerDestination(sourceEntity);
+                if (dualScope != null && !callerOrigin && !callerDestination) {
+                    throw new SecurityException("AUTHZ_DUPLICATE_DRAFT_CUSTODY_DENIED: Caller holds neither origin nor destination custody on source record '"
                             + sourceId + "'");
                 }
                 DraftDTO rawDraft = rawDraftBuilder.apply(sourceEntity);
                 if (rawDraft == null) {
                     return null;
                 }
-                return sanitizeDuplicateDraftPayload(rawDraft, targetEval, dualScope, callerCedente, callerCessionario);
+                return sanitizeDuplicateDraftPayload(rawDraft, targetEval, dualScope, callerOrigin, callerDestination);
             } catch (RuntimeException | Error ex) {
                 serviceSupport.clearMutationAndQueryContextsOnFailure(this);
                 throw ex;
@@ -1482,11 +1512,11 @@ public abstract class AbstractAuthzGovernedResourceService<
             writeRestrictedAttributes.addAll(targetEval.fieldWriteDeniedAttributeIds());
         }
         if (dualScope != null) {
-            if (!callerCedente && dualScope.cedenteExclusiveWriteAttributes() != null) {
-                writeRestrictedAttributes.addAll(dualScope.cedenteExclusiveWriteAttributes());
+            if (!callerCedente && dualScope.originExclusiveWriteAttributes() != null) {
+                writeRestrictedAttributes.addAll(dualScope.originExclusiveWriteAttributes());
             }
-            if (!callerCessionario && dualScope.cessionarioAllowedWriteAttributes() != null) {
-                writeRestrictedAttributes.addAll(dualScope.cessionarioAllowedWriteAttributes());
+            if (!callerCessionario && dualScope.destinationAllowedWriteAttributes() != null) {
+                writeRestrictedAttributes.addAll(dualScope.destinationAllowedWriteAttributes());
             }
         }
 
@@ -1886,8 +1916,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 resolveTechnicalConcurrencyPointers(),
                 resolveMandatoryScopeAnchorAttributeIds(),
                 resolveDualScopeDelegationSpec(),
-                isCallerCedente(entity),
-                isCallerCessionario(entity),
+                isCallerOrigin(entity),
+                isCallerDestination(entity),
                 mergedFacts,
                 resolveFactStatuses(mergedFacts),
                 this
@@ -1916,8 +1946,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 resolveTechnicalConcurrencyPointers(),
                 resolveMandatoryScopeAnchorAttributeIds(),
                 resolveDualScopeDelegationSpec(),
-                isCallerCedente(existing),
-                isCallerCessionario(existing),
+                isCallerOrigin(existing),
+                isCallerDestination(existing),
                 mergedFacts,
                 resolveFactStatuses(mergedFacts),
                 this
@@ -1938,8 +1968,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 decisionPoint,
                 factContractDigest,
                 resolveDualScopeDelegationSpec(),
-                isCallerCedente(entity),
-                isCallerCessionario(entity),
+                isCallerOrigin(entity),
+                isCallerDestination(entity),
                 mergedFacts,
                 resolveFactStatuses(mergedFacts),
                 this
