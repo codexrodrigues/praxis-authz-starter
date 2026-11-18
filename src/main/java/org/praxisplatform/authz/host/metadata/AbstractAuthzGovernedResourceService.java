@@ -1,5 +1,6 @@
 package org.praxisplatform.authz.host.metadata;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -152,6 +153,10 @@ public abstract class AbstractAuthzGovernedResourceService<
     private final AuthzResourceGovernanceSpec<E> governanceSpec;
     private final AuthzCallerContextProvider callerContextProvider;
     private final ObjectMapper deltaObjectMapper;
+    private static final ObjectMapper MASKED_PROJECTION_MAPPER =
+            AuthzGovernedResourceServiceSupport.createMaskedProjectionObjectMapper();
+    private final ObjectMapper writeIntentBeanMapper =
+            AuthzGovernedResourceServiceSupport.createWriteIntentBeanObjectMapper();
     private final Map<Class<?>, IntrospectedDtoGovernanceContract> writeContractCache = new ConcurrentHashMap<>();
 
     private volatile IntrospectedDtoGovernanceContract governanceContract;
@@ -208,7 +213,8 @@ public abstract class AbstractAuthzGovernedResourceService<
         this.callerContextProvider = Objects.requireNonNull(callerContextProvider, "callerContextProvider is required");
         this.deltaObjectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     }
 
     /**
@@ -262,7 +268,8 @@ public abstract class AbstractAuthzGovernedResourceService<
         this.callerContextProvider = null;
         this.deltaObjectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     }
 
     /** Returns the raw unmasked {@link ResourceMapper} to be wrapped automatically by this base class. */
@@ -517,17 +524,20 @@ public abstract class AbstractAuthzGovernedResourceService<
 
     /** Returns resolution statuses for the given facts, defaulting to {@link FactResolutionStatus#PRESENT}. */
     protected Map<String, FactResolutionStatus> resolveFactStatuses(Map<String, Object> facts) {
-        if (facts == null || facts.isEmpty()) {
+        return resolveFactStatuses(facts, null);
+    }
+
+    /**
+     * Returns resolution statuses for the given facts and entity, recording {@link FactResolutionStatus#NULL}
+     * for scalar bindings whose entity property evaluates to {@code null}.
+     */
+    protected Map<String, FactResolutionStatus> resolveFactStatuses(Map<String, Object> facts, E entity) {
+        if ((facts == null || facts.isEmpty()) && entity == null) {
             return Map.of();
         }
-        Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
-        if (callerContextProvider != null) {
-            statuses.putAll(callerContextProvider.currentCallerContext().factStatuses());
-        }
-        for (String key : facts.keySet()) {
-            statuses.putIfAbsent(key, FactResolutionStatus.PRESENT);
-        }
-        return Map.copyOf(statuses);
+        Map<String, FactResolutionStatus> callerStatuses =
+                callerContextProvider != null ? callerContextProvider.currentCallerContext().factStatuses() : Map.of();
+        return AuthzResourceGovernanceSpec.resolveFactStatuses(callerStatuses, facts, governanceSpec, entity);
     }
 
     /** Returns the introspected {@link IntrospectedDtoGovernanceContract} for {@code responseType}. */
@@ -869,7 +879,7 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerOrigin(existing),
                 isCallerDestination(existing),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts),
+                resolveFactStatuses(mergedFacts, existing),
                 this
         );
     }
@@ -1404,7 +1414,7 @@ public abstract class AbstractAuthzGovernedResourceService<
             try {
                 E sourceEntity = findEntityById(sourceId);
                 Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(sourceEntity);
-                Map<String, FactResolutionStatus> statuses = resolveFactStatuses(mergedFacts);
+                Map<String, FactResolutionStatus> statuses = resolveFactStatuses(mergedFacts, sourceEntity);
                 DecisionPointDescriptor effectiveDp = resolveOperationDecisionPoint(effectiveOpId);
                 TargetReadProjectionEvaluation targetEval;
                 if (effectiveDp != null && effectiveDp != decisionPoint) {
@@ -1564,7 +1574,7 @@ public abstract class AbstractAuthzGovernedResourceService<
         if (rawDraft instanceof Map<?, ?>) {
             return (DraftDTO) java.util.Collections.unmodifiableMap(sanitized);
         }
-        return (DraftDTO) mapper.convertValue(sanitized, rawDraft.getClass());
+        return (DraftDTO) MASKED_PROJECTION_MAPPER.convertValue(sanitized, rawDraft.getClass());
     }
 
     /**
@@ -1584,7 +1594,7 @@ public abstract class AbstractAuthzGovernedResourceService<
                 decisionPoint,
                 factContractDigest,
                 mergedFacts,
-                resolveFactStatuses(mergedFacts)
+                resolveFactStatuses(mergedFacts, entity)
         );
     }
 
@@ -1939,7 +1949,7 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerOrigin(entity),
                 isCallerDestination(entity),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts),
+                resolveFactStatuses(mergedFacts, entity),
                 this
         );
         hydrateBeforeCreate(dto, entity);
@@ -1969,7 +1979,7 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerOrigin(existing),
                 isCallerDestination(existing),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts),
+                resolveFactStatuses(mergedFacts, existing),
                 this
         );
         hydrateBeforeUpdate(id, existing, dto);
@@ -1991,7 +2001,7 @@ public abstract class AbstractAuthzGovernedResourceService<
                 isCallerOrigin(entity),
                 isCallerDestination(entity),
                 mergedFacts,
-                resolveFactStatuses(mergedFacts),
+                resolveFactStatuses(mergedFacts, entity),
                 this
         );
         onBeforeDelete(id, entity);
@@ -2098,7 +2108,7 @@ public abstract class AbstractAuthzGovernedResourceService<
                 ? Map.of()
                 : (dto instanceof Map<?, ?> m
                         ? (Map<String, Object>) m
-                        : deltaObjectMapper.convertValue(dto, Map.class));
+                        : writeIntentBeanMapper.convertValue(dto, Map.class));
         Set<String> anchors = resolveMandatoryScopeAnchorAttributeIds();
         Map<String, String> wireToAttr = writeContract.wirePointerToAttributeIdMap();
         Map<String, Object> filtered = new LinkedHashMap<>();
@@ -2153,7 +2163,7 @@ public abstract class AbstractAuthzGovernedResourceService<
         }
         Map<String, Object> dtoMap = dto instanceof Map<?, ?> m
                 ? (Map<String, Object>) m
-                : deltaObjectMapper.convertValue(dto, Map.class);
+                : writeIntentBeanMapper.convertValue(dto, Map.class);
         if (existing == null) {
             return dtoMap;
         }

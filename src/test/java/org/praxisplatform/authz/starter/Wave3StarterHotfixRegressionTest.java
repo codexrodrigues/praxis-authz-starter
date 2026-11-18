@@ -8,7 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -21,6 +23,8 @@ import org.praxisplatform.authz.contracts.context.FactCardinality;
 import org.praxisplatform.authz.contracts.context.FactPresenceModel;
 import org.praxisplatform.authz.contracts.context.FactResolutionStatus;
 import org.praxisplatform.authz.contracts.context.FactValueType;
+import org.praxisplatform.authz.contracts.datascope.DataScopeOutcome;
+import org.praxisplatform.authz.contracts.datascope.SearchPredicateOperator;
 import org.praxisplatform.authz.contracts.decisionpoint.EvaluationMode;
 import org.praxisplatform.authz.contracts.envelope.ContributionAuthority;
 import org.praxisplatform.authz.contracts.envelope.ObligationDirective;
@@ -56,6 +60,7 @@ import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
 import org.praxisplatform.authz.telemetry.SanitizedAuthorizationTelemetryPublisher;
+import org.praxisplatform.uischema.mapper.base.ResourceMapper;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -83,6 +88,22 @@ class Wave3StarterHotfixRegressionTest {
         public Long organizationId;
         public String name;
         public String secretCode;
+    }
+
+    @SuppressWarnings("unused")
+    private static final class ComputedGetterResponseDTO {
+        @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+        public Long id;
+
+        @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+        public Boolean ativo = true;
+
+        public String name;
+        public String secretCode;
+
+        public Long getComputedOccupiedCount() {
+            return 4L;
+        }
     }
 
     private static MetadataResourceAuthorizationSeam createSeam(
@@ -444,5 +465,405 @@ class Wave3StarterHotfixRegressionTest {
         assertFalse(sharedEval.maskDirectives().isEmpty());
         assertTrue(sharedEval.maskDirectives().stream()
                 .anyMatch(d -> "secretCode".equals(d.attributeId())));
+    }
+
+    @Test
+    void unmaskedAuthenticatedSharedAndBulkActionSynthesizeValidSearchRules() {
+        AuthzResourceGovernanceSpec<SampleOrgEntity> unmaskedSharedSpec = AuthzResourceGovernanceSpec
+                .<SampleOrgEntity>builder("workforce.reference-catalogs")
+                .serviceKey("workforce-svc")
+                .scalarFieldBinding(
+                        "resource.id",
+                        "id",
+                        "e.id",
+                        FactValueType.INT64,
+                        Set.of(SearchPredicateOperator.EQ, SearchPredicateOperator.IN, SearchPredicateOperator.IS_NOT_NULL),
+                        false
+                )
+                .scalarFieldBinding("resource.name", "name", "e.name", FactValueType.STRING, Set.of(SearchPredicateOperator.EQ), false)
+                .tenantScope(new AuthzResourceGovernanceSpec.TenantScopeSpec(
+                        AuthzTenantScopeMode.AUTHENTICATED_SHARED,
+                        "organizationId",
+                        "",
+                        "subject.principalId",
+                        "",
+                        "",
+                        false,
+                        ""
+                ))
+                .bulkWorkflowAction("approve-batch", Set.of("name"))
+                .build();
+
+        AuthzResourceGovernanceSpec<SampleOrgEntity> annotatedSharedSpec = AuthzResourceGovernanceSpec
+                .<SampleOrgEntity>builder("workforce.annotated-shared-catalogs")
+                .serviceKey("workforce-svc")
+                .scalarFieldBinding(
+                        "resource.id",
+                        "id",
+                        "e.id",
+                        FactValueType.INT64,
+                        Set.of(SearchPredicateOperator.EQ, SearchPredicateOperator.IN, SearchPredicateOperator.IS_NOT_NULL),
+                        false
+                )
+                .scalarFieldBinding("resource.name", "name", "e.name", FactValueType.STRING, Set.of(SearchPredicateOperator.EQ), false)
+                .tenantScope(new AuthzResourceGovernanceSpec.TenantScopeSpec(
+                        AuthzTenantScopeMode.AUTHENTICATED_SHARED,
+                        "organizationId",
+                        "",
+                        "subject.principalId",
+                        "",
+                        "",
+                        false,
+                        ""
+                ))
+                .bulkWorkflowAction("publish-batch", Set.of("name"))
+                .build();
+
+        Map<String, Object> principalPresent = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
+
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("workforce-svc")
+                        .addResourceSpec(unmaskedSharedSpec, SampleOrgEntity.class, null, null)
+                        .addAuthenticatedSharedPolicy(
+                                unmaskedSharedSpec,
+                                "rule-ref-catalog-shared",
+                                List.of(),
+                                List.of()
+                        )
+                        .addSharedBulkActionPolicy(
+                                unmaskedSharedSpec,
+                                "approve-batch",
+                                "rule-ref-catalog-bulk-approve",
+                                principalPresent,
+                                Set.of("name")
+                        )
+                        .addAnnotatedResource(annotatedSharedSpec, SampleOrgEntity.class, null, null)
+                        .build();
+
+        DriverManagerDataSource ds = new DriverManagerDataSource(
+                "jdbc:h2:mem:wave3_unmasked_shared_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
+        MetadataResourceAuthorizationSeam seam = createSeam(
+                bundle,
+                new TransactionTemplate(new DataSourceTransactionManager(ds)),
+                jdbcTemplate
+        );
+
+        JpaDataScopeAdapter unmaskedJpa = new JpaDataScopeAdapter(
+                unmaskedSharedSpec.queryProjection(),
+                unmaskedSharedSpec.fieldBindings()
+        );
+        var unmaskedQueryCtx = seam.authorizeAndCompileJpaQueryScope(
+                unmaskedSharedSpec.decisionPoint(),
+                unmaskedSharedSpec.factContractDigest(),
+                Set.of(),
+                Map.of("subject.principalId", "user-1"),
+                Map.of("subject.principalId", FactResolutionStatus.PRESENT),
+                Map.of(),
+                List.of(),
+                unmaskedJpa,
+                "1 = 1",
+                Map.of(),
+                row -> true
+        );
+        assertEquals(DataScopeOutcome.ALL, unmaskedQueryCtx.scopeOutcome());
+
+        var unmaskedBulkCtx = seam.authorizeAndCompileJpaQueryScope(
+                unmaskedSharedSpec.actionDecisionPoints().get("approve-batch"),
+                unmaskedSharedSpec.factContractDigest(),
+                Set.of(),
+                Map.of("subject.principalId", "user-1"),
+                Map.of("subject.principalId", FactResolutionStatus.PRESENT),
+                Map.of(),
+                List.of(),
+                unmaskedJpa,
+                "1 = 1",
+                Map.of(),
+                row -> true
+        );
+        assertEquals(DataScopeOutcome.FILTER, unmaskedBulkCtx.scopeOutcome());
+
+        var unmaskedTarget = seam.evaluateTargetReadProjection(
+                unmaskedSharedSpec.decisionPoint(),
+                unmaskedSharedSpec.factContractDigest(),
+                Map.of("subject.principalId", "user-1"),
+                Map.of("subject.principalId", FactResolutionStatus.PRESENT)
+        );
+        assertTrue(unmaskedTarget.maskDirectives().isEmpty());
+
+        assertThrows(AuthzAccessDeniedException.class, () ->
+                seam.evaluateTargetReadProjection(
+                        unmaskedSharedSpec.decisionPoint(),
+                        unmaskedSharedSpec.factContractDigest(),
+                        Map.of("subject.principalId", ""),
+                        Map.of("subject.principalId", FactResolutionStatus.PRESENT)
+                )
+        );
+
+        JpaDataScopeAdapter annotatedJpa = new JpaDataScopeAdapter(
+                annotatedSharedSpec.queryProjection(),
+                annotatedSharedSpec.fieldBindings()
+        );
+        var annotatedQueryCtx = seam.authorizeAndCompileJpaQueryScope(
+                annotatedSharedSpec.decisionPoint(),
+                annotatedSharedSpec.factContractDigest(),
+                Set.of(),
+                Map.of("subject.principalId", "user-1"),
+                Map.of("subject.principalId", FactResolutionStatus.PRESENT),
+                Map.of(),
+                List.of(),
+                annotatedJpa,
+                "1 = 1",
+                Map.of(),
+                row -> true
+        );
+        assertEquals(DataScopeOutcome.ALL, annotatedQueryCtx.scopeOutcome());
+
+        var annotatedBulkCtx = seam.authorizeAndCompileJpaQueryScope(
+                annotatedSharedSpec.actionDecisionPoints().get("publish-batch"),
+                annotatedSharedSpec.factContractDigest(),
+                Set.of(),
+                Map.of("subject.principalId", "user-1"),
+                Map.of("subject.principalId", FactResolutionStatus.PRESENT),
+                Map.of(),
+                List.of(),
+                annotatedJpa,
+                "1 = 1",
+                Map.of(),
+                row -> true
+        );
+        assertEquals(DataScopeOutcome.FILTER, annotatedBulkCtx.scopeOutcome());
+    }
+
+    @Test
+    void wrappedMapperIgnoresComputedReadOnlyDtoGettersDuringMasking() {
+        AuthzResourceGovernanceSpec<SampleOrgEntity> spec = AuthzResourceGovernanceSpec
+                .<SampleOrgEntity>builder("workforce.positions")
+                .serviceKey("workforce-svc")
+                .scalarFieldBinding("resource.organizationId", "workforce.positions.organization_id", "organizationId")
+                .resourceSensitiveFact(
+                        "resource.secretCode",
+                        "workforce.positions.secret_code",
+                        FactValueType.STRING,
+                        "LGPD_SENSITIVE",
+                        "STATUTORY_LEGAL_OBLIGATION"
+                )
+                .build();
+
+        List<MaskContributionSpec> masks = List.of(new MaskContributionSpec(
+                PolicyFieldSelector.exact(Set.of("workforce.positions.secret_code")),
+                "REDACT_CONSTANT",
+                Map.of("replacement", "***")
+        ));
+
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("workforce-svc")
+                        .addResourceSpec(spec, ComputedGetterResponseDTO.class, SampleOrgEntity.class, SampleOrgEntity.class)
+                        .addOrganizationalScopePolicy(
+                                spec,
+                                "rule-workforce-positions-scope",
+                                "resource.organizationId",
+                                "subject.organizationUnitIds",
+                                masks,
+                                List.of()
+                        )
+                        .build();
+
+        DriverManagerDataSource ds = new DriverManagerDataSource(
+                "jdbc:h2:mem:wave3_computed_getter_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
+        TransactionTemplate txTemplate = new TransactionTemplate(new DataSourceTransactionManager(ds));
+        MetadataResourceAuthorizationSeam seam = createSeam(bundle, txTemplate, jdbcTemplate);
+        AuthzGovernedResourceServiceSupport serviceSupport =
+                new AuthzGovernedResourceServiceSupport(seam, new DetachedDtoMaskingProcessor());
+
+        ResourceMapper<SampleOrgEntity, ComputedGetterResponseDTO, SampleOrgEntity, SampleOrgEntity, Long> rawMapper =
+                new ResourceMapper<>() {
+                    @Override
+                    public ComputedGetterResponseDTO toResponse(SampleOrgEntity entity) {
+                        ComputedGetterResponseDTO dto = new ComputedGetterResponseDTO();
+                        dto.id = entity.id;
+                        dto.ativo = Boolean.FALSE;
+                        dto.name = entity.name;
+                        dto.secretCode = entity.secretCode;
+                        return dto;
+                    }
+
+                    @Override
+                    public SampleOrgEntity newEntity(SampleOrgEntity dto) {
+                        return dto;
+                    }
+
+                    @Override
+                    public void applyUpdate(SampleOrgEntity entity, SampleOrgEntity dto) {
+                        entity.name = dto.name;
+                    }
+
+                    @Override
+                    public Long extractId(SampleOrgEntity entity) {
+                        return entity.id;
+                    }
+                };
+
+        ResourceMapper<SampleOrgEntity, ComputedGetterResponseDTO, SampleOrgEntity, SampleOrgEntity, Long> wrappedMapper =
+                serviceSupport.wrapResourceMapper(rawMapper, ComputedGetterResponseDTO.class, spec.resourceKey());
+
+        SampleOrgEntity entity = new SampleOrgEntity();
+        entity.id = 77L;
+        entity.organizationId = 10L;
+        entity.name = "Analista";
+        entity.secretCode = "SENSITIVE-XYZ";
+
+        txTemplate.executeWithoutResult(status -> {
+            serviceSupport.authorizeBeforeHydrationAndRules(
+                    spec.decisionPoint(),
+                    spec.factContractDigest(),
+                    "POST",
+                    false,
+                    "{\"organizationId\":10,\"name\":\"Analista\"}",
+                    Map.of(
+                            "/organizationId", "workforce.positions.organization_id",
+                            "/name", "workforce.positions.name"
+                    ),
+                    Set.of("/version"),
+                    Set.of("workforce.positions.organization_id"),
+                    null,
+                    true,
+                    false,
+                    Map.of(
+                            "subject.principalId", "mgr-1",
+                            "subject.organizationUnitIds", List.of(10L),
+                            "resource.organizationId", 10L
+                    ),
+                    Map.of(
+                            "subject.principalId", FactResolutionStatus.PRESENT,
+                            "subject.organizationUnitIds", FactResolutionStatus.PRESENT,
+                            "resource.organizationId", FactResolutionStatus.PRESENT
+                    )
+            );
+            serviceSupport.markPostMutationReadyForOutboxAndMasking();
+            ComputedGetterResponseDTO mapped = wrappedMapper.toResponse(entity);
+            assertEquals(77L, mapped.id);
+            assertEquals(Boolean.FALSE, mapped.ativo);
+            assertEquals("Analista", mapped.name);
+            assertEquals("***", mapped.secretCode);
+            assertEquals(4L, mapped.getComputedOccupiedCount());
+        });
+
+        ComputedGetterResponseDTO writeBean = new ComputedGetterResponseDTO();
+        writeBean.id = 99L;
+        writeBean.name = "Alterado";
+        writeBean.secretCode = "KEEP-WRITABLE";
+        @SuppressWarnings("unchecked")
+        Map<String, Object> writeIntentMap =
+                AuthzGovernedResourceServiceSupport.createWriteIntentBeanObjectMapper()
+                        .convertValue(writeBean, Map.class);
+        assertFalse(writeIntentMap.containsKey("id"));
+        assertFalse(writeIntentMap.containsKey("ativo"));
+        assertEquals("Alterado", writeIntentMap.get("name"));
+        assertEquals("KEEP-WRITABLE", writeIntentMap.get("secretCode"));
+    }
+
+    @Test
+    void allowGlobalNullScopeCompilesAndAdmitsBothOrgMatchedAndNullScopedRecords() {
+        AuthzResourceGovernanceSpec<SampleOrgEntity> spec = AuthzResourceGovernanceSpec
+                .<SampleOrgEntity>builder("workforce.global-rules")
+                .serviceKey("workforce-svc")
+                .tenantField("organizationId")
+                .allowGlobalNullScope(true)
+                .introspectFromResource(
+                        SampleOrgEntity.class,
+                        SampleOrgEntity.class,
+                        null,
+                        SampleOrgEntity.class,
+                        SampleOrgEntity.class,
+                        null,
+                        null
+                )
+                .build();
+
+        assertTrue(
+                spec.mandatoryScopeAnchorAttributeIds().isEmpty(),
+                "Nullable global-or-org scope fields must not become mandatory scope anchors"
+        );
+        assertEquals(
+                FactPresenceModel.MAY_BE_ABSENT,
+                spec.factContract().descriptorsByPath().get("resource.organizationId").presenceModel()
+        );
+
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("workforce-svc")
+                        .addResourceSpec(spec, SampleOrgEntity.class, SampleOrgEntity.class, SampleOrgEntity.class)
+                        .addOrganizationalScopePolicy(
+                                spec,
+                                "rule-workforce-global-rules-scope",
+                                "resource.organizationId",
+                                "subject.organizationUnitIds",
+                                List.of(),
+                                List.of()
+                        )
+                        .build();
+
+        DriverManagerDataSource ds = new DriverManagerDataSource(
+                "jdbc:h2:mem:wave3_global_null_scope_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
+        MetadataResourceAuthorizationSeam seam = createSeam(
+                bundle,
+                new TransactionTemplate(new DataSourceTransactionManager(ds)),
+                jdbcTemplate
+        );
+
+        SampleOrgEntity orgMatched = new SampleOrgEntity();
+        orgMatched.id = 1L;
+        orgMatched.organizationId = 10L;
+        orgMatched.name = "Org Rule";
+
+        Map<String, Object> orgFacts = new LinkedHashMap<>(spec.extractEntityTargetFacts(orgMatched));
+        orgFacts.put("subject.principalId", "user-1");
+        orgFacts.put("subject.organizationUnitIds", List.of(10L));
+        var orgEval = seam.evaluateTargetReadProjection(
+                spec.decisionPoint(),
+                spec.factContractDigest(),
+                orgFacts,
+                AuthzResourceGovernanceSpec.resolveFactStatuses(Map.of(), orgFacts, spec, orgMatched)
+        );
+        assertNotNull(orgEval);
+
+        SampleOrgEntity globalRecord = new SampleOrgEntity();
+        globalRecord.id = 2L;
+        globalRecord.organizationId = null;
+        globalRecord.name = "Global Rule";
+
+        Map<String, Object> globalFacts = new LinkedHashMap<>(spec.extractEntityTargetFacts(globalRecord));
+        globalFacts.put("subject.principalId", "user-1");
+        globalFacts.put("subject.organizationUnitIds", List.of(10L));
+        Map<String, FactResolutionStatus> globalStatuses =
+                AuthzResourceGovernanceSpec.resolveFactStatuses(Map.of(), globalFacts, spec, globalRecord);
+        assertEquals(FactResolutionStatus.NULL, globalStatuses.get("resource.organizationId"));
+
+        var globalEval = seam.evaluateTargetReadProjection(
+                spec.decisionPoint(),
+                spec.factContractDigest(),
+                globalFacts,
+                globalStatuses
+        );
+        assertNotNull(globalEval);
+
+        SampleOrgEntity foreignOrg = new SampleOrgEntity();
+        foreignOrg.id = 3L;
+        foreignOrg.organizationId = 99L;
+        foreignOrg.name = "Foreign Rule";
+
+        Map<String, Object> foreignFacts = new LinkedHashMap<>(spec.extractEntityTargetFacts(foreignOrg));
+        foreignFacts.put("subject.principalId", "user-1");
+        foreignFacts.put("subject.organizationUnitIds", List.of(10L));
+        assertThrows(AuthzAccessDeniedException.class, () ->
+                seam.evaluateTargetReadProjection(
+                        spec.decisionPoint(),
+                        spec.factContractDigest(),
+                        foreignFacts,
+                        AuthzResourceGovernanceSpec.resolveFactStatuses(Map.of(), foreignFacts, spec, foreignOrg)
+                )
+        );
     }
 }

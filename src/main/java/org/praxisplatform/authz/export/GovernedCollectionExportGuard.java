@@ -1,6 +1,9 @@
 package org.praxisplatform.authz.export;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -43,7 +46,10 @@ public final class GovernedCollectionExportGuard {
     ) {}
 
     private final DetachedDtoMaskingProcessor maskingProcessor;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
     public GovernedCollectionExportGuard(DetachedDtoMaskingProcessor maskingProcessor) {
         this.maskingProcessor = Objects.requireNonNull(maskingProcessor, "maskingProcessor is required");

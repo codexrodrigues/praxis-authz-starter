@@ -338,17 +338,20 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
 
     /** Returns resolution statuses for the given facts, defaulting to {@link FactResolutionStatus#PRESENT}. */
     protected Map<String, FactResolutionStatus> resolveFactStatuses(Map<String, Object> facts) {
-        if (facts == null || facts.isEmpty()) {
+        return resolveFactStatuses(facts, null);
+    }
+
+    /**
+     * Returns resolution statuses for the given facts and entity, recording {@link FactResolutionStatus#NULL}
+     * for scalar bindings whose entity property evaluates to {@code null}.
+     */
+    protected Map<String, FactResolutionStatus> resolveFactStatuses(Map<String, Object> facts, E entity) {
+        if ((facts == null || facts.isEmpty()) && entity == null) {
             return Map.of();
         }
-        Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
-        if (callerContextProvider != null) {
-            statuses.putAll(callerContextProvider.currentCallerContext().factStatuses());
-        }
-        for (String key : facts.keySet()) {
-            statuses.putIfAbsent(key, FactResolutionStatus.PRESENT);
-        }
-        return Map.copyOf(statuses);
+        Map<String, FactResolutionStatus> callerStatuses =
+                callerContextProvider != null ? callerContextProvider.currentCallerContext().factStatuses() : Map.of();
+        return AuthzResourceGovernanceSpec.resolveFactStatuses(callerStatuses, facts, governanceSpec, entity);
     }
 
     /** Returns the introspected {@link IntrospectedDtoGovernanceContract} for {@code responseType}. */
@@ -887,7 +890,7 @@ public abstract class AbstractAuthzGovernedReadOnlyResourceService<
                 decisionPoint,
                 factContractDigest,
                 mergedFacts,
-                resolveFactStatuses(mergedFacts)
+                resolveFactStatuses(mergedFacts, entity)
         );
     }
 

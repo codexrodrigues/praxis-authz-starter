@@ -1,8 +1,15 @@
 package org.praxisplatform.authz.host.metadata;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.introspect.Annotated;
+import com.fasterxml.jackson.databind.introspect.AnnotatedMember;
+import com.fasterxml.jackson.databind.introspect.JacksonAnnotationIntrospector;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.util.ArrayDeque;
@@ -80,6 +87,7 @@ public final class AuthzGovernedResourceServiceSupport {
     private final DetachedDtoMaskingProcessor maskingProcessor;
     private final MetadataDtoGovernanceIntrospector dtoIntrospector;
     private final ObjectMapper objectMapper;
+    private final ObjectMapper maskedProjectionMapper;
 
     private static final Object DEFAULT_OWNER = new Object();
     private static final Object TX_CLEANUP_KEY = new Object();
@@ -162,7 +170,48 @@ public final class AuthzGovernedResourceServiceSupport {
         this.dtoIntrospector = Objects.requireNonNull(dtoIntrospector, "dtoIntrospector is required");
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+        this.maskedProjectionMapper = createMaskedProjectionObjectMapper();
+    }
+
+    /**
+     * Creates an {@link ObjectMapper} for internal re-hydration of sanitized detached projections
+     * back into typed DTOs, treating {@code @JsonProperty(access = READ_ONLY)} as deserializable
+     * so host read-only properties (e.g. {@code id}, {@code ativo}) are never wiped during masking.
+     */
+    public static ObjectMapper createMaskedProjectionObjectMapper() {
+        return new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY)
+                .setAnnotationIntrospector(new JacksonAnnotationIntrospector() {
+                    @Override
+                    public JsonProperty.Access findPropertyAccess(Annotated m) {
+                        JsonProperty.Access access = super.findPropertyAccess(m);
+                        return access == JsonProperty.Access.READ_ONLY ? JsonProperty.Access.AUTO : access;
+                    }
+                });
+    }
+
+    /**
+     * Creates an {@link ObjectMapper} for converting already-deserialized inbound Java write DTO
+     * beans into maps for {@code WriteIntent} extraction, excluding {@code READ_ONLY} default
+     * field initializers that cannot be supplied by clients.
+     */
+    public static ObjectMapper createWriteIntentBeanObjectMapper() {
+        return new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .setAnnotationIntrospector(new JacksonAnnotationIntrospector() {
+                    @Override
+                    public boolean hasIgnoreMarker(AnnotatedMember m) {
+                        return super.hasIgnoreMarker(m)
+                                || super.findPropertyAccess(m) == JsonProperty.Access.READ_ONLY;
+                    }
+                });
     }
 
     /** Returns the {@link MetadataDtoGovernanceIntrospector} used to inspect DTO annotations. */
@@ -1025,7 +1074,7 @@ public final class AuthzGovernedResourceServiceSupport {
                     rawResponse,
                     fieldSchemas
             );
-            return objectMapper.convertValue(masked.detachedProjection(), responseType);
+            return maskedProjectionMapper.convertValue(masked.detachedProjection(), responseType);
         }
         if (top instanceof QueryFrame qf) {
             AuthorizedQueryScopeContext queryCtx = qf.context();
@@ -1047,7 +1096,7 @@ public final class AuthzGovernedResourceServiceSupport {
                             mergedDenied,
                             mergedMasks
                     );
-                    return objectMapper.convertValue(masked.detachedProjection(), responseType);
+                    return maskedProjectionMapper.convertValue(masked.detachedProjection(), responseType);
                 }
             }
             List<DetachedDtoMaskingResult> maskedList = authorizationSeam.projectAndMaskQueryResults(
@@ -1055,7 +1104,7 @@ public final class AuthzGovernedResourceServiceSupport {
                     List.of(rawResponse),
                     fieldSchemas
             );
-            return objectMapper.convertValue(maskedList.getFirst().detachedProjection(), responseType);
+            return maskedProjectionMapper.convertValue(maskedList.getFirst().detachedProjection(), responseType);
         }
         throw new IllegalStateException(
                 "Fail-closed: ResourceMapper.toResponse invoked without an active AuthorizedQueryScopeContext or AuthorizedPreMutationContext (P11, P12, P20)");
@@ -1158,7 +1207,7 @@ public final class AuthzGovernedResourceServiceSupport {
                 responseDto,
                 fieldSchemas
         );
-        return objectMapper.convertValue(masked.detachedProjection(), responseType);
+        return maskedProjectionMapper.convertValue(masked.detachedProjection(), responseType);
     }
 
     /**
@@ -1188,7 +1237,7 @@ public final class AuthzGovernedResourceServiceSupport {
             );
             List<ResponseDTO> converted = new ArrayList<>(maskedList.size());
             for (DetachedDtoMaskingResult m : maskedList) {
-                converted.add(objectMapper.convertValue(m.detachedProjection(), responseType));
+                converted.add(maskedProjectionMapper.convertValue(m.detachedProjection(), responseType));
             }
             return List.copyOf(converted);
         } finally {

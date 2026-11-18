@@ -60,6 +60,7 @@ import org.praxisplatform.authz.contracts.context.FactContract;
 import org.praxisplatform.authz.contracts.context.FactDescriptor;
 import org.praxisplatform.authz.contracts.context.FactPresenceModel;
 import org.praxisplatform.authz.contracts.context.FactResolutionStage;
+import org.praxisplatform.authz.contracts.context.FactResolutionStatus;
 import org.praxisplatform.authz.contracts.context.FactSlotNamespace;
 import org.praxisplatform.authz.contracts.context.FactValueType;
 import org.praxisplatform.authz.contracts.datascope.ComparisonPredicateIr;
@@ -923,6 +924,62 @@ public final class AuthzResourceGovernanceSpec<E> {
             }
         }
         return Map.copyOf(facts);
+    }
+
+    /**
+     * Extracts {@link FactResolutionStatus#NULL} entries for scalar {@link #fieldBindings()} whose
+     * property evaluates to {@code null} on {@code entity}, enabling {@code is_null} predicates
+     * (such as {@code allowGlobalNullScope}) in {@code TARGET} evaluations without placing {@code null}
+     * values in immutable fact maps.
+     *
+     * @param entity JPA entity instance
+     * @return immutable map of {@code resource.*} paths with {@link FactResolutionStatus#NULL}
+     */
+    public Map<String, FactResolutionStatus> extractEntityTargetFactStatuses(E entity) {
+        if (entity == null) {
+            return Map.of();
+        }
+        Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
+        for (QueryAdapterFieldBinding binding : fieldBindings) {
+            if (binding.traversalStrategy() != RelationTraversalStrategy.CORRELATED_EXISTS_SUBQUERY) {
+                Object val = readNestedProperty(entity, binding.nativeJpaPath());
+                if (val == null) {
+                    statuses.put(binding.fieldPath(), FactResolutionStatus.NULL);
+                }
+            }
+        }
+        return statuses.isEmpty() ? Map.of() : Map.copyOf(statuses);
+    }
+
+    /**
+     * Builds canonical {@link FactResolutionStatus} entries from caller statuses, non-null facts
+     * (defaulted to {@link FactResolutionStatus#PRESENT}), and nullable scalar bindings on
+     * {@code entity} whose value is {@code null} ({@link FactResolutionStatus#NULL}).
+     */
+    public static <E> Map<String, FactResolutionStatus> resolveFactStatuses(
+            Map<String, FactResolutionStatus> baseStatuses,
+            Map<String, Object> facts,
+            AuthzResourceGovernanceSpec<E> spec,
+            E entity
+    ) {
+        Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
+        if (baseStatuses != null && !baseStatuses.isEmpty()) {
+            statuses.putAll(baseStatuses);
+        }
+        if (facts != null) {
+            for (String key : facts.keySet()) {
+                statuses.putIfAbsent(key, FactResolutionStatus.PRESENT);
+            }
+        }
+        if (spec != null && entity != null) {
+            for (Map.Entry<String, FactResolutionStatus> entry :
+                    spec.extractEntityTargetFactStatuses(entity).entrySet()) {
+                if (facts == null || !facts.containsKey(entry.getKey())) {
+                    statuses.putIfAbsent(entry.getKey(), entry.getValue());
+                }
+            }
+        }
+        return statuses.isEmpty() ? Map.of() : Map.copyOf(statuses);
     }
 
     /**
@@ -2979,7 +3036,9 @@ public final class AuthzResourceGovernanceSpec<E> {
                 String factPath = "resource." + fieldName;
                 if (registeredFactPaths.add(factPath)) {
                     String attributeId = resolveAttributeIdForPath(fieldName, dtoContract);
-                    boolean nullable = isNullableEntityField(field);
+                    boolean isTenantScopeField = fieldName.equals(this.tenantFieldName);
+                    boolean nullable = isNullableEntityField(field)
+                            || (isTenantScopeField && this.allowGlobalNullScope);
                     scalarFieldBinding(
                             factPath,
                             attributeId,
@@ -2988,7 +3047,8 @@ public final class AuthzResourceGovernanceSpec<E> {
                             defaultOperatorsForValueType(valueType),
                             nullable
                     );
-                    if (fieldName.equals(this.tenantFieldName)
+                    if (isTenantScopeField
+                            && !this.allowGlobalNullScope
                             && this.tenantScopeMode != AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
                         this.mandatoryScopeAnchorAttributeIds.add(attributeId);
                     }
@@ -3003,17 +3063,28 @@ public final class AuthzResourceGovernanceSpec<E> {
                 if (resolved == null) {
                     continue;
                 }
-                String factPath = "resource." + candidatePath.trim().replace('.', '_');
+                String trimmedPath = candidatePath.trim();
+                String factPath = "resource." + trimmedPath.replace('.', '_');
                 if (!registeredFactPaths.add(factPath)) {
                     continue;
                 }
-                String attributeId = resolveAttributeIdForPath(candidatePath.trim(), dtoContract);
+                String attributeId = resolveAttributeIdForPath(trimmedPath, dtoContract);
                 Set<SearchPredicateOperator> operators = defaultOperatorsForValueType(resolved.valueType());
                 if (resolved.collectionTraversal()) {
-                    collectionFieldBinding(factPath, attributeId, candidatePath.trim(), resolved.valueType(), operators, true);
+                    collectionFieldBinding(factPath, attributeId, trimmedPath, resolved.valueType(), operators, true);
                 } else {
-                    scalarFieldBinding(factPath, attributeId, candidatePath.trim(), resolved.valueType(), operators, resolved.nullable());
-                    if (candidatePath.trim().equals(this.tenantFieldName)) {
+                    boolean isTenantScopePath = trimmedPath.equals(this.tenantFieldName);
+                    scalarFieldBinding(
+                            factPath,
+                            attributeId,
+                            trimmedPath,
+                            resolved.valueType(),
+                            operators,
+                            resolved.nullable() || (isTenantScopePath && this.allowGlobalNullScope)
+                    );
+                    if (isTenantScopePath
+                            && !this.allowGlobalNullScope
+                            && this.tenantScopeMode != AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
                         this.mandatoryScopeAnchorAttributeIds.add(attributeId);
                     }
                 }

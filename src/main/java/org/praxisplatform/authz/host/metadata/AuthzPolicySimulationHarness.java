@@ -1185,6 +1185,8 @@ public final class AuthzPolicySimulationHarness<E, ResponseDTO> {
     private final Class<ResponseDTO> responseDtoClass;
     private final IntrospectedDtoGovernanceContract responseGovernanceContract;
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+    private final ObjectMapper maskedProjectionMapper =
+            AuthzGovernedResourceServiceSupport.createMaskedProjectionObjectMapper();
 
     private AuthzPolicySimulationHarness(
             AuthzResourceGovernanceSpec<E> spec,
@@ -4128,7 +4130,7 @@ public final class AuthzPolicySimulationHarness<E, ResponseDTO> {
                         responseGovernanceContract.fieldSchemas()
                 );
                 if (!results.isEmpty()) {
-                    maskedDto = objectMapper.convertValue(results.getFirst().detachedProjection(), responseDtoClass);
+                    maskedDto = maskedProjectionMapper.convertValue(results.getFirst().detachedProjection(), responseDtoClass);
                 }
             }
             return new ReadSimulationOutcome<>(

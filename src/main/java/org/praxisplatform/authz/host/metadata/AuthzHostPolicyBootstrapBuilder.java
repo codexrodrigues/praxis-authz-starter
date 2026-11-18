@@ -23,7 +23,10 @@ import org.praxisplatform.authz.contracts.compatibility.ImpactCompletenessStatus
 import org.praxisplatform.authz.contracts.compatibility.ImpactGraphBaseline;
 import org.praxisplatform.authz.contracts.compatibility.RolloutActivationStrategy;
 import org.praxisplatform.authz.contracts.context.FactContract;
+import org.praxisplatform.authz.contracts.context.FactDescriptor;
+import org.praxisplatform.authz.contracts.datascope.QueryableFieldDescriptor;
 import org.praxisplatform.authz.contracts.datascope.QueryableResourceProjection;
+import org.praxisplatform.authz.contracts.datascope.SearchPredicateOperator;
 import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor;
 import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointRef;
 import org.praxisplatform.authz.contracts.decisionpoint.EnforcementCapability;
@@ -43,6 +46,7 @@ import org.praxisplatform.authz.contracts.policy.AuthorizationRuleContributions;
 import org.praxisplatform.authz.contracts.policy.AuthorizationSourceCondition;
 import org.praxisplatform.authz.contracts.policy.ConditionProfileKind;
 import org.praxisplatform.authz.contracts.policy.DataScopeContributionSpec;
+import org.praxisplatform.authz.contracts.policy.FieldUseContributionSpec;
 import org.praxisplatform.authz.contracts.policy.FieldWriteContributionSpec;
 import org.praxisplatform.authz.contracts.policy.MaskContributionSpec;
 import org.praxisplatform.authz.contracts.policy.PolicyFieldSelector;
@@ -391,15 +395,19 @@ public final class AuthzHostPolicyBootstrapBuilder {
     ) {
         Objects.requireNonNull(resourceScopeFactPath, "resourceScopeFactPath is required");
         Objects.requireNonNull(subjectScopeSetFactPath, "subjectScopeSetFactPath is required");
+        Map<String, Object> baseScope = Map.of("in", List.of(
+                Map.of("var", resourceScopeFactPath),
+                Map.of("var", subjectScopeSetFactPath)
+        ));
+        Map<String, Object> dataScopeSearchCondition = spec.allowGlobalNullScope()
+                ? Map.of("or", List.of(baseScope, Map.of("is_null", List.of(Map.of("var", resourceScopeFactPath)))))
+                : baseScope;
         return addBulkActionPolicy(
                 spec,
                 actionKey,
                 ruleId,
                 Map.of("!=", List.of(Map.of("var", "subject.principalId"), "")),
-                Map.of("in", List.of(
-                        Map.of("var", resourceScopeFactPath),
-                        Map.of("var", subjectScopeSetFactPath)
-                )),
+                dataScopeSearchCondition,
                 allowedAttributeWrites
         );
     }
@@ -503,8 +511,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
             ));
         }
         if (evalModes.contains(EvaluationMode.TARGET)) {
-            Map<String, Object> targetCombinedCondition = Map.of(
-                    "and",
+            Map<String, Object> targetCombinedCondition = combineAndConditions(
                     List.of(admissionCondition, dataScopeSearchCondition)
             );
             rules.add(new AuthorizationPolicyRule(
@@ -561,6 +568,34 @@ public final class AuthzHostPolicyBootstrapBuilder {
                 ))
         );
         return addPolicy(policy);
+    }
+
+    /**
+     * Synthesizes and registers a collection-and-target {@link AuthorizationPolicyDefinition} for an
+     * {@code AUTHENTICATED_SHARED} bulk workflow action ({@code BulkMode.DOMAIN_COMMAND}), using a
+     * non-null predicate on the resource's primary queryable field for its shared {@code SEARCH} scope.
+     */
+    public AuthzHostPolicyBootstrapBuilder addSharedBulkActionPolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String actionKey,
+            String ruleId,
+            Map<String, Object> admissionCondition,
+            Set<String> allowedAttributeWrites
+    ) {
+        Objects.requireNonNull(spec, "spec is required");
+        String primaryFieldPath = resolvePrimaryQueryableFieldPath(spec);
+        Map<String, Object> nonNullScopeCondition = Map.of(
+                "is_not_null",
+                List.of(Map.of("var", primaryFieldPath))
+        );
+        return addBulkActionPolicy(
+                spec,
+                actionKey,
+                ruleId,
+                admissionCondition,
+                nonNullScopeCondition,
+                allowedAttributeWrites
+        );
     }
 
     /**
@@ -983,6 +1018,8 @@ public final class AuthzHostPolicyBootstrapBuilder {
             }
         } else if (spec.tenantScopeMode()
                 == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
+            List<FieldUseContributionSpec> searchFieldUse =
+                    searchMasks.isEmpty() ? defaultSearchFieldUse(spec) : List.of();
             rules.add(new AuthorizationPolicyRule(
                     baseRuleId + "-shared-search",
                     "Authenticated shared SEARCH access for " + spec.resourceKey(),
@@ -995,7 +1032,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
                     new AuthorizationRuleContributions(
                             new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
                             null,
-                            List.of(),
+                            searchFieldUse,
                             List.of(),
                             searchMasks,
                             "ALLOW_AUTHENTICATED_SHARED_SEARCH"
@@ -1167,17 +1204,18 @@ public final class AuthzHostPolicyBootstrapBuilder {
             List<AuthorizationPolicyRule> rules = new ArrayList<>();
             if (evalModes.contains(EvaluationMode.SEARCH)) {
                 Map<String, Object> searchCond = buildAnnotatedRuleCondition(spec, ruleSpec, false);
-                DataScopeContributionSpec searchScope = spec.tenantScopeMode()
+                Map<String, Object> searchScopeExpr = spec.tenantScopeMode()
                         == org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode.AUTHENTICATED_SHARED
-                        ? null
-                        : new DataScopeContributionSpec(
-                                ContributionAuthority.GRANT,
-                                new AuthorizationSourceCondition(
-                                        AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
-                                        ConditionProfileKind.AUTHORIZATION_SEARCH_SOURCE_V1,
-                                        buildResourceScopePredicate(spec)
-                                )
-                        );
+                        ? Map.of("is_not_null", List.of(Map.of("var", resolvePrimaryQueryableFieldPath(spec))))
+                        : buildResourceScopePredicate(spec);
+                DataScopeContributionSpec searchScope = new DataScopeContributionSpec(
+                        ContributionAuthority.GRANT,
+                        new AuthorizationSourceCondition(
+                                AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                                ConditionProfileKind.AUTHORIZATION_SEARCH_SOURCE_V1,
+                                searchScopeExpr
+                        )
+                );
                 rules.add(new AuthorizationPolicyRule(
                         ruleId + "-search",
                         "Grants SEARCH admission and scope for workflow action '" + actionKey
@@ -1674,13 +1712,16 @@ public final class AuthzHostPolicyBootstrapBuilder {
 
         List<MaskContributionSpec> masks = maskDirectives == null ? List.of() : List.copyOf(maskDirectives);
         Map<String, Object> principalCondition = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
-        Map<String, Object> scopeInCondition = Map.of(
+        Map<String, Object> baseComparison = Map.of(
                 "in",
                 List.of(
                         Map.of("var", resourceScopeFactPath),
                         Map.of("var", subjectScopeSetFactPath)
                 )
         );
+        Map<String, Object> scopeInCondition = spec.allowGlobalNullScope()
+                ? Map.of("or", List.of(baseComparison, Map.of("is_null", Map.of("var", resourceScopeFactPath))))
+                : baseComparison;
         List<ObligationDirective> auditObligations = durableResourceAccessAuditObligations();
 
         AuthorizationPolicyRule searchRule = new AuthorizationPolicyRule(
@@ -1717,7 +1758,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
                 new AuthorizationSourceCondition(
                         AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
                         ConditionProfileKind.AUTHORIZATION_TARGET_V1,
-                        Map.of("and", List.of(principalCondition, scopeInCondition))
+                        combineAndConditions(List.of(principalCondition, scopeInCondition))
                 ),
                 new AuthorizationRuleContributions(
                         new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
@@ -1781,6 +1822,8 @@ public final class AuthzHostPolicyBootstrapBuilder {
         Objects.requireNonNull(spec, "spec is required");
         Objects.requireNonNull(ruleId, "ruleId is required");
         List<MaskContributionSpec> masks = maskDirectives == null ? List.of() : List.copyOf(maskDirectives);
+        List<FieldUseContributionSpec> searchFieldUse =
+                masks.isEmpty() ? defaultSearchFieldUse(spec) : List.of();
         Map<String, Object> principalCondition = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
         List<ObligationDirective> auditObligations = durableResourceAccessAuditObligations();
 
@@ -1796,7 +1839,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
                 new AuthorizationRuleContributions(
                         new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
                         null,
-                        List.of(),
+                        searchFieldUse,
                         List.of(),
                         masks,
                         "ALLOW_AUTHENTICATED_SHARED_SEARCH"
@@ -1831,6 +1874,81 @@ public final class AuthzHostPolicyBootstrapBuilder {
                 Set.of("AUTHENTICATED_SHARED"),
                 combinePolicyRules(List.of(searchRule, targetRule), additionalRules)
         ));
+    }
+
+    private static List<FieldUseContributionSpec> defaultSearchFieldUse(
+            AuthzResourceGovernanceSpec<?> spec
+    ) {
+        if (spec.factContract() != null && spec.factContract().descriptorsByPath() != null) {
+            for (FactDescriptor descriptor : spec.factContract().descriptorsByPath().values()) {
+                if (descriptor != null
+                        && descriptor.factPath().startsWith("resource.")
+                        && descriptor.attributeId() != null
+                        && !descriptor.attributeId().isBlank()
+                        && !"RESTRICTED".equalsIgnoreCase(descriptor.classification())
+                        && !"SECRET".equalsIgnoreCase(descriptor.dataCategory())
+                        && !"CREDENTIAL".equalsIgnoreCase(descriptor.dataCategory())) {
+                    return List.of(new FieldUseContributionSpec(
+                            PolicyFieldSelector.exact(Set.of(descriptor.attributeId())),
+                            Set.of(FieldUseCategory.VALUE),
+                            RuleEffect.ALLOW
+                    ));
+                }
+            }
+            for (FactDescriptor descriptor : spec.factContract().descriptorsByPath().values()) {
+                if (descriptor != null
+                        && descriptor.factPath().startsWith("resource.")
+                        && descriptor.attributeId() != null
+                        && !descriptor.attributeId().isBlank()) {
+                    return List.of(new FieldUseContributionSpec(
+                            PolicyFieldSelector.exact(Set.of(descriptor.attributeId())),
+                            Set.of(FieldUseCategory.VALUE),
+                            RuleEffect.ALLOW
+                    ));
+                }
+            }
+        }
+        if (spec.queryProjection() != null && spec.queryProjection().fieldsByPath() != null) {
+            for (QueryableFieldDescriptor descriptor : spec.queryProjection().fieldsByPath().values()) {
+                if (descriptor != null
+                        && descriptor.attributeId() != null
+                        && !descriptor.attributeId().isBlank()) {
+                    return List.of(new FieldUseContributionSpec(
+                            PolicyFieldSelector.exact(Set.of(descriptor.attributeId())),
+                            Set.of(FieldUseCategory.VALUE),
+                            RuleEffect.ALLOW
+                    ));
+                }
+            }
+        }
+        throw new IllegalStateException(
+                "Unable to locate canonical resource attributeId for SEARCH fieldUse contribution on "
+                        + spec.resourceKey()
+        );
+    }
+
+    private static String resolvePrimaryQueryableFieldPath(AuthzResourceGovernanceSpec<?> spec) {
+        AuthzResourceGovernanceSpec.TenantScopeSpec tenantSpec = spec.tenantScopeSpec();
+        if (tenantSpec != null
+                && tenantSpec.sharedBulkNonNullFactPath() != null
+                && !tenantSpec.sharedBulkNonNullFactPath().isBlank()) {
+            return tenantSpec.sharedBulkNonNullFactPath().trim();
+        }
+        if (spec.queryProjection() != null && spec.queryProjection().fieldsByPath() != null
+                && !spec.queryProjection().fieldsByPath().isEmpty()) {
+            Map<String, QueryableFieldDescriptor> fieldsByPath = spec.queryProjection().fieldsByPath();
+            for (QueryableFieldDescriptor qfd : fieldsByPath.values()) {
+                if (qfd != null && qfd.supportedOperators() != null
+                        && qfd.supportedOperators().contains(SearchPredicateOperator.IS_NOT_NULL)) {
+                    return qfd.fieldPath();
+                }
+            }
+            return fieldsByPath.keySet().iterator().next();
+        }
+        throw new IllegalStateException(
+                "Unable to locate primary queryable field path for AUTHENTICATED_SHARED dataScope on "
+                        + spec.resourceKey()
+        );
     }
 
     private static List<ObligationDirective> durableResourceAccessAuditObligations() {

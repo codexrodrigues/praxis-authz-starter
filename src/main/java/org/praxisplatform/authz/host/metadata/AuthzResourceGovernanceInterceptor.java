@@ -1,5 +1,6 @@
 package org.praxisplatform.authz.host.metadata;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -138,6 +139,8 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
     private final ConcurrentMap<Class<?>, ResolvedGovernanceMetadata> metadataCache = new ConcurrentHashMap<>();
     private volatile boolean controllerBeansScanned = false;
     private final ObjectMapper objectMapper;
+    private final ObjectMapper writeIntentBeanMapper =
+            AuthzGovernedResourceServiceSupport.createWriteIntentBeanObjectMapper();
     private final ThreadLocal<SnapshotCaptureSlot> snapshotCapture = new ThreadLocal<>();
     private final ThreadLocal<Map<String, ResourceStateSnapshot>> scopedSnapshotCache = new ThreadLocal<>();
 
@@ -193,7 +196,8 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         }
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     }
 
     /** Registers or replaces an explicit {@link AuthzResourceGovernanceSpec} by {@code resourceKey}. */
@@ -614,7 +618,8 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
 
         E targetEntityForFacts = previous != null ? previous : candidate;
         Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(spec, callerCtx, targetEntityForFacts, candidate);
-        Map<String, FactResolutionStatus> statuses = resolveFactStatuses(callerCtx, mergedFacts);
+        Map<String, FactResolutionStatus> statuses =
+                resolveFactStatuses(callerCtx, mergedFacts, spec, targetEntityForFacts);
         boolean callerOrigin = spec.isCallerOrigin(targetEntityForFacts, callerCtx);
         boolean callerDestination = spec.isCallerDestination(targetEntityForFacts, callerCtx);
 
@@ -749,7 +754,7 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
                 dp,
                 digest,
                 mergedFacts,
-                resolveFactStatuses(callerCtx, mergedFacts)
+                resolveFactStatuses(callerCtx, mergedFacts, spec, entity)
         );
     }
 
@@ -781,14 +786,21 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
             AuthzCallerContext callerCtx,
             Map<String, Object> facts
     ) {
-        Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
-        if (callerCtx.factStatuses() != null) {
-            statuses.putAll(callerCtx.factStatuses());
-        }
-        for (String key : facts.keySet()) {
-            statuses.putIfAbsent(key, FactResolutionStatus.PRESENT);
-        }
-        return Map.copyOf(statuses);
+        return resolveFactStatuses(callerCtx, facts, null, null);
+    }
+
+    private static <E> Map<String, FactResolutionStatus> resolveFactStatuses(
+            AuthzCallerContext callerCtx,
+            Map<String, Object> facts,
+            AuthzResourceGovernanceSpec<E> spec,
+            E entity
+    ) {
+        return AuthzResourceGovernanceSpec.resolveFactStatuses(
+                callerCtx != null ? callerCtx.factStatuses() : Map.of(),
+                facts,
+                spec,
+                entity
+        );
     }
 
     private IntrospectedDtoGovernanceContract resolveWriteContract(
@@ -829,7 +841,7 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         if (dto instanceof Map<?, ?> map) {
             dtoMap = (Map<String, Object>) map;
         } else if (dto != null) {
-            dtoMap = objectMapper.convertValue(dto, Map.class);
+            dtoMap = writeIntentBeanMapper.convertValue(dto, Map.class);
         } else if (candidate != null) {
             dtoMap = readEntityReadableProperties(candidate, wireToAttr);
         } else {
