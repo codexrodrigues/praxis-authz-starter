@@ -385,7 +385,8 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
             E entity,
             AccessMode mode
     ) {
-        if (entity == null || isExplicitlyGovernedService(service)) {
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (unwrapped == null || isExplicitlyGovernedService(service)) {
             return;
         }
         ResolvedGovernanceMetadata meta = resolveMetadataIfGoverned(service, true);
@@ -397,24 +398,24 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
 
         AuthorizedQueryScopeContext activeQueryCtx = ensureActiveQueryContext(service, meta, callerCtx);
         DataScopePlan activePlan = activeQueryCtx != null ? activeQueryCtx.dataScopePlan() : null;
-        spec.verifyEntityAccessAllowed(entity, callerCtx, activePlan);
+        spec.verifyEntityAccessAllowed(unwrapped, callerCtx, activePlan);
 
         if (mode == AccessMode.READ || mode == AccessMode.EXPORT) {
-            evaluateTargetReadProjection(spec, entity, callerCtx);
+            evaluateTargetReadProjection(spec, unwrapped, callerCtx);
         }
         SnapshotCaptureSlot slot = snapshotCapture.get();
         if (slot != null && slot.expectedService == service) {
-            slot.capturedEntity = entity;
+            slot.capturedEntity = unwrapped;
         }
         if (ResourceStateSnapshotScope.isOpen()) {
-            Object entityId = readPropertyQuietly(entity, "id");
+            Object entityId = readPropertyQuietly(unwrapped, "id");
             if (entityId != null) {
                 Map<String, ResourceStateSnapshot> cache = scopedSnapshotCache.get();
                 if (cache == null) {
                     cache = new LinkedHashMap<>();
                     scopedSnapshotCache.set(cache);
                 }
-                cache.put(scopedCacheKey(service, entityId), spec.toResourceStateSnapshot(entity));
+                cache.put(scopedCacheKey(service, entityId), spec.toResourceStateSnapshot(unwrapped));
             }
         } else {
             scopedSnapshotCache.remove();
@@ -442,12 +443,13 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         boolean checkTargetPerEntity = (mode == AccessMode.READ || mode == AccessMode.EXPORT)
                 && requiresRecordContextualTargetMasking(spec);
         for (E entity : entities) {
-            if (entity == null) {
+            E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+            if (unwrapped == null) {
                 continue;
             }
-            spec.verifyEntityAccessAllowed(entity, callerCtx, activePlan);
+            spec.verifyEntityAccessAllowed(unwrapped, callerCtx, activePlan);
             if (checkTargetPerEntity) {
-                evaluateTargetReadProjection(spec, entity, callerCtx);
+                evaluateTargetReadProjection(spec, unwrapped, callerCtx);
             }
         }
     }
@@ -467,6 +469,7 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         if (meta == null) {
             return dto;
         }
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
         AuthzResourceGovernanceSpec<E> spec = (AuthzResourceGovernanceSpec<E>) meta.spec();
         AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
         if (!serviceSupport.hasActiveMutationContext() && serviceSupport.currentQueryScopeContext() == null) {
@@ -475,13 +478,13 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
 
         Class<R> dtoClass = (Class<R>) dto.getClass();
         Function<E, TargetReadProjectionEvaluation> contextualTargetEval = null;
-        if (entity != null && (requiresRecordContextualTargetMasking(spec)
+        if (unwrapped != null && (requiresRecordContextualTargetMasking(spec)
                 || isCustomSurfaceOperation(spec, surfaceOrOperation))) {
             contextualTargetEval = rawEntity -> evaluateTargetReadProjectionForOperation(
-                    spec, rawEntity, callerCtx, surfaceOrOperation);
+                    spec, AuthzEntityUnproxySupport.unproxy(rawEntity), callerCtx, surfaceOrOperation);
         }
         return serviceSupport.maskMapperResponseIfReady(
-                entity,
+                unwrapped,
                 dto,
                 dtoClass,
                 meta.responseContract().fieldSchemas(),
@@ -611,13 +614,15 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
         ensureTransactionCleanupRegistered(service);
 
+        E unwrappedCandidate = AuthzEntityUnproxySupport.unproxy(candidate);
+        E unwrappedPrevious = AuthzEntityUnproxySupport.unproxy(previous);
         MutationKind kind = mutationContext != null ? mutationContext.kind() : MutationKind.UPDATE;
         if (kind != MutationKind.DELETE) {
-            spec.verifyWritableTarget(candidate, previous, callerCtx);
+            spec.verifyWritableTarget(unwrappedCandidate, unwrappedPrevious, callerCtx);
         }
 
-        E targetEntityForFacts = previous != null ? previous : candidate;
-        Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(spec, callerCtx, targetEntityForFacts, candidate);
+        E targetEntityForFacts = unwrappedPrevious != null ? unwrappedPrevious : unwrappedCandidate;
+        Map<String, Object> mergedFacts = mergeSubjectAndEntityFacts(spec, callerCtx, targetEntityForFacts, unwrappedCandidate);
         Map<String, FactResolutionStatus> statuses =
                 resolveFactStatuses(callerCtx, mergedFacts, spec, targetEntityForFacts);
         boolean callerOrigin = spec.isCallerOrigin(targetEntityForFacts, callerCtx);
@@ -644,8 +649,8 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
                 writeContract,
                 kind,
                 mutationContext,
-                candidate,
-                previous
+                unwrappedCandidate,
+                unwrappedPrevious
         );
         String verb = kind == MutationKind.CREATE ? "POST" : "PATCH";
         serviceSupport.authorizeBeforeHydrationAndRules(
@@ -933,13 +938,17 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
     }
 
     private static Object readPropertyQuietly(Object target, String propertyName) {
-        Class<?> type = ClassUtils.getUserClass(target);
+        Object unwrapped = AuthzEntityUnproxySupport.unproxy(target);
+        if (unwrapped == null) {
+            return null;
+        }
+        Class<?> type = ClassUtils.getUserClass(unwrapped);
         String cap = Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
         for (String methodName : List.of("get" + cap, "is" + cap, propertyName)) {
             try {
                 Method m = type.getMethod(methodName);
                 if (m.getParameterCount() == 0) {
-                    return m.invoke(target);
+                    return m.invoke(unwrapped);
                 }
             } catch (Exception ignored) {
                 // fall back
@@ -949,7 +958,7 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
             try {
                 Field f = curr.getDeclaredField(propertyName);
                 f.setAccessible(true);
-                return f.get(target);
+                return f.get(unwrapped);
             } catch (Exception ignored) {
                 // continue
             }

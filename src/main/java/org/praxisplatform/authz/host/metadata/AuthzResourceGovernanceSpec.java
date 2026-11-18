@@ -837,13 +837,14 @@ public final class AuthzResourceGovernanceSpec<E> {
      * Extracts the raw organizational/tenant scope field value from {@code entity}.
      */
     public Object extractRawScopeValueFromEntity(E entity) {
-        if (entity == null) {
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (unwrapped == null) {
             return null;
         }
         if (entityTenantExtractor != null) {
-            return entityTenantExtractor.apply(entity);
+            return entityTenantExtractor.apply(unwrapped);
         }
-        return readNestedProperty(entity, tenantFieldName);
+        return readNestedProperty(unwrapped, tenantFieldName);
     }
 
     /**
@@ -858,7 +859,12 @@ public final class AuthzResourceGovernanceSpec<E> {
      * Verifies write-target organizational invariants against {@link HardScopeResolver}.
      */
     public void verifyWritableTarget(E candidate, E previous, AuthzCallerContext callerContext) {
-        hardScopeResolver.verifyWritableTarget(this, candidate, previous, callerContext);
+        hardScopeResolver.verifyWritableTarget(
+                this,
+                AuthzEntityUnproxySupport.unproxy(candidate),
+                AuthzEntityUnproxySupport.unproxy(previous),
+                callerContext
+        );
     }
 
     /**
@@ -869,13 +875,14 @@ public final class AuthzResourceGovernanceSpec<E> {
      * @return extracted tenant identifier or {@code null}
      */
     public String extractTenantFromEntity(E entity) {
-        if (entity == null) {
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (unwrapped == null) {
             return null;
         }
         if (entityTenantExtractor != null) {
-            return entityTenantExtractor.apply(entity);
+            return entityTenantExtractor.apply(unwrapped);
         }
-        Object val = readNestedProperty(entity, tenantFieldName);
+        Object val = readNestedProperty(unwrapped, tenantFieldName);
         return val == null ? null : String.valueOf(val);
     }
 
@@ -888,16 +895,17 @@ public final class AuthzResourceGovernanceSpec<E> {
      * @return immutable map of extracted {@code resource.*} facts
      */
     public Map<String, Object> extractEntityTargetFacts(E entity) {
-        if (entity == null) {
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (unwrapped == null) {
             return Map.of();
         }
         Map<String, Object> facts = new LinkedHashMap<>();
         for (QueryAdapterFieldBinding binding : fieldBindings) {
             if (binding.traversalStrategy() == RelationTraversalStrategy.CORRELATED_EXISTS_SUBQUERY) {
-                List<Object> values = extractCollectionValues(entity, binding.nativeJpaPath());
+                List<Object> values = extractCollectionValues(unwrapped, binding.nativeJpaPath());
                 facts.put(binding.fieldPath(), values);
             } else {
-                Object val = readNestedProperty(entity, binding.nativeJpaPath());
+                Object val = readNestedProperty(unwrapped, binding.nativeJpaPath());
                 if (val != null) {
                     facts.put(binding.fieldPath(), val);
                 }
@@ -905,20 +913,20 @@ public final class AuthzResourceGovernanceSpec<E> {
         }
         if (dualScopeDelegationSpec != null) {
             if (originEntityFieldPath != null && dualScopeDelegationSpec.originFactPath() != null) {
-                Object originVal = readNestedProperty(entity, originEntityFieldPath);
+                Object originVal = readNestedProperty(unwrapped, originEntityFieldPath);
                 if (originVal != null) {
                     facts.putIfAbsent(dualScopeDelegationSpec.originFactPath(), originVal);
                 }
             }
             if (destinationEntityFieldPath != null && dualScopeDelegationSpec.destinationFactPath() != null) {
-                Object destinationVal = readNestedProperty(entity, destinationEntityFieldPath);
+                Object destinationVal = readNestedProperty(unwrapped, destinationEntityFieldPath);
                 if (destinationVal != null) {
                     facts.putIfAbsent(dualScopeDelegationSpec.destinationFactPath(), destinationVal);
                 }
             }
         }
         if (targetFactExtractor != null) {
-            Map<String, Object> custom = targetFactExtractor.apply(entity);
+            Map<String, Object> custom = targetFactExtractor.apply(unwrapped);
             if (custom != null && !custom.isEmpty()) {
                 facts.putAll(custom);
             }
@@ -936,13 +944,14 @@ public final class AuthzResourceGovernanceSpec<E> {
      * @return immutable map of {@code resource.*} paths with {@link FactResolutionStatus#NULL}
      */
     public Map<String, FactResolutionStatus> extractEntityTargetFactStatuses(E entity) {
-        if (entity == null) {
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (unwrapped == null) {
             return Map.of();
         }
         Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
         for (QueryAdapterFieldBinding binding : fieldBindings) {
             if (binding.traversalStrategy() != RelationTraversalStrategy.CORRELATED_EXISTS_SUBQUERY) {
-                Object val = readNestedProperty(entity, binding.nativeJpaPath());
+                Object val = readNestedProperty(unwrapped, binding.nativeJpaPath());
                 if (val == null) {
                     statuses.put(binding.fieldPath(), FactResolutionStatus.NULL);
                 }
@@ -990,14 +999,15 @@ public final class AuthzResourceGovernanceSpec<E> {
      * @return extracted state string or {@code null}
      */
     public String extractEntityState(E entity) {
-        if (entity == null) {
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (unwrapped == null) {
             return null;
         }
         if (stateExtractor != null) {
-            return stateExtractor.apply(entity);
+            return stateExtractor.apply(unwrapped);
         }
         if (stateFieldName != null && !stateFieldName.isBlank()) {
-            Object val = readNestedProperty(entity, stateFieldName);
+            Object val = readNestedProperty(unwrapped, stateFieldName);
             return val == null ? null : String.valueOf(val);
         }
         return null;
@@ -1012,9 +1022,9 @@ public final class AuthzResourceGovernanceSpec<E> {
      * @return populated {@link ResourceStateSnapshot}
      */
     public ResourceStateSnapshot toResourceStateSnapshot(E entity) {
-        Objects.requireNonNull(entity, "entity is required");
-        String state = extractEntityState(entity);
-        Map<String, Object> metadata = new LinkedHashMap<>(extractEntityTargetFacts(entity));
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(Objects.requireNonNull(entity, "entity is required"));
+        String state = extractEntityState(unwrapped);
+        Map<String, Object> metadata = new LinkedHashMap<>(extractEntityTargetFacts(unwrapped));
         for (QueryAdapterFieldBinding binding : fieldBindings) {
             if (binding.traversalStrategy() != RelationTraversalStrategy.CORRELATED_EXISTS_SUBQUERY) {
                 Object val = metadata.get(binding.fieldPath());
@@ -1024,25 +1034,25 @@ public final class AuthzResourceGovernanceSpec<E> {
             }
         }
         if (tenantScopeMode != AuthzTenantScopeMode.AUTHENTICATED_SHARED) {
-            String tenantId = extractTenantFromEntity(entity);
+            String tenantId = extractTenantFromEntity(unwrapped);
             if (tenantId != null) {
                 metadata.put(SNAPSHOT_TENANT_META_KEY, tenantId);
             }
         }
         if (originEntityFieldPath != null) {
-            Object originVal = readNestedProperty(entity, originEntityFieldPath);
+            Object originVal = readNestedProperty(unwrapped, originEntityFieldPath);
             if (originVal != null) {
                 metadata.put(SNAPSHOT_ORIGIN_VALUE_META_KEY, originVal);
             }
         }
         if (destinationEntityFieldPath != null) {
-            Object destinationVal = readNestedProperty(entity, destinationEntityFieldPath);
+            Object destinationVal = readNestedProperty(unwrapped, destinationEntityFieldPath);
             if (destinationVal != null) {
                 metadata.put(SNAPSHOT_DESTINATION_VALUE_META_KEY, destinationVal);
             }
         }
         if (originCustodyPredicate != null || destinationCustodyPredicate != null) {
-            metadata.put(SNAPSHOT_ENTITY_REF_META_KEY, entity);
+            metadata.put(SNAPSHOT_ENTITY_REF_META_KEY, unwrapped);
         }
         return ResourceStateSnapshot.of(state, metadata);
     }
@@ -1093,15 +1103,16 @@ public final class AuthzResourceGovernanceSpec<E> {
         if (callerContext.callerMatchesOrigin() != null) {
             return callerContext.callerMatchesOrigin();
         }
-        if (originCustodyPredicate != null && entity != null) {
-            return originCustodyPredicate.test(entity, callerContext);
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (originCustodyPredicate != null && unwrapped != null) {
+            return originCustodyPredicate.test(unwrapped, callerContext);
         }
         if (originEntityFieldPath != null && originSubjectFactKey != null) {
             Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(originSubjectFactKey);
-            if (entity == null) {
+            if (unwrapped == null) {
                 return hasNonEmptyCustodySubjectFact(subjectFact);
             }
-            Object entityVal = readNestedProperty(entity, originEntityFieldPath);
+            Object entityVal = readNestedProperty(unwrapped, originEntityFieldPath);
             return matchesCustodyValue(entityVal, subjectFact);
         }
         return true;
@@ -1122,15 +1133,16 @@ public final class AuthzResourceGovernanceSpec<E> {
         if (callerContext.callerMatchesDestination() != null) {
             return callerContext.callerMatchesDestination();
         }
-        if (destinationCustodyPredicate != null && entity != null) {
-            return destinationCustodyPredicate.test(entity, callerContext);
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        if (destinationCustodyPredicate != null && unwrapped != null) {
+            return destinationCustodyPredicate.test(unwrapped, callerContext);
         }
         if (destinationEntityFieldPath != null && destinationSubjectFactKey != null) {
             Object subjectFact = callerContext.subjectAndEnvironmentFacts().get(destinationSubjectFactKey);
-            if (entity == null) {
+            if (unwrapped == null) {
                 return hasNonEmptyCustodySubjectFact(subjectFact);
             }
-            Object entityVal = readNestedProperty(entity, destinationEntityFieldPath);
+            Object entityVal = readNestedProperty(unwrapped, destinationEntityFieldPath);
             return matchesCustodyValue(entityVal, subjectFact);
         }
         return true;
@@ -1271,9 +1283,9 @@ public final class AuthzResourceGovernanceSpec<E> {
             AuthzCallerContext callerContext,
             DataScopePlan activeDataScopePlan
     ) {
-        Objects.requireNonNull(entity, "entity is required");
+        E unwrapped = AuthzEntityUnproxySupport.unproxy(Objects.requireNonNull(entity, "entity is required"));
         Objects.requireNonNull(callerContext, "callerContext is required");
-        hardScopeResolver.verifyEntityAccess(this, entity, callerContext);
+        hardScopeResolver.verifyEntityAccess(this, unwrapped, callerContext);
         if (activeDataScopePlan != null) {
             if (activeDataScopePlan.scopeOutcome() == DataScopeOutcome.NONE) {
                 throw new SecurityException(
@@ -1283,13 +1295,13 @@ public final class AuthzResourceGovernanceSpec<E> {
                 SearchPredicateIr predicateIr = Objects.requireNonNull(
                         activeDataScopePlan.predicateIr(), "FILTER outcome requires non-null predicateIr");
                 queryProjection.validatePredicateIr(predicateIr);
-                if (!evaluatePredicateIrOnEntity(entity, predicateIr, false)) {
+                if (!evaluatePredicateIrOnEntity(unwrapped, predicateIr, false)) {
                     throw new SecurityException(
                             "AUTHZ_ENTITY_DATA_SCOPE_DENIED: Entity is outside caller's authorized DataScopePlan (403)");
                 }
             }
         }
-        if (entityScopePredicate != null && !entityScopePredicate.test(entity, callerContext)) {
+        if (entityScopePredicate != null && !entityScopePredicate.test(unwrapped, callerContext)) {
             throw new SecurityException(
                     "AUTHZ_ENTITY_DATA_SCOPE_DENIED: Entity is outside caller's authorized DataScopePlan (403)");
         }
@@ -1497,19 +1509,23 @@ public final class AuthzResourceGovernanceSpec<E> {
     }
 
     private static Object readSingleField(Object target, String fieldName) {
-        Class<?> current = target.getClass();
+        Object unwrapped = AuthzEntityUnproxySupport.unproxy(target);
+        if (unwrapped == null) {
+            return null;
+        }
+        Class<?> current = unwrapped.getClass();
         while (current != null && current != Object.class) {
             try {
                 Field f = current.getDeclaredField(fieldName);
                 f.setAccessible(true);
-                return f.get(target);
+                return f.get(unwrapped);
             } catch (NoSuchFieldException ignored) {
                 current = current.getSuperclass();
             } catch (IllegalAccessException ex) {
-                throw new IllegalStateException("Failed to read field '" + fieldName + "' on " + target.getClass().getName(), ex);
+                throw new IllegalStateException("Failed to read field '" + fieldName + "' on " + unwrapped.getClass().getName(), ex);
             }
         }
-        throw new IllegalStateException("Field '" + fieldName + "' not found on class " + target.getClass().getName());
+        throw new IllegalStateException("Field '" + fieldName + "' not found on class " + unwrapped.getClass().getName());
     }
 
     /**

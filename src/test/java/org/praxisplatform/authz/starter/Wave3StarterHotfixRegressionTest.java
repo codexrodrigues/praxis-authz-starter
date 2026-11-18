@@ -10,12 +10,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.lang.reflect.Proxy;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import org.hibernate.proxy.HibernateProxy;
+import org.hibernate.proxy.LazyInitializer;
 import org.junit.jupiter.api.Test;
 import org.praxisplatform.authz.autoconfigure.PraxisAuthzHostBridgeAutoConfiguration;
 import org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode;
@@ -60,7 +63,9 @@ import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
 import org.praxisplatform.authz.telemetry.SanitizedAuthorizationTelemetryPublisher;
+import org.praxisplatform.uischema.governance.AccessMode;
 import org.praxisplatform.uischema.mapper.base.ResourceMapper;
+import org.praxisplatform.uischema.service.base.BaseResourceQueryService;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -83,7 +88,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 class Wave3StarterHotfixRegressionTest {
 
     @SuppressWarnings("unused")
-    private static final class SampleOrgEntity {
+    private static class SampleOrgEntity {
         public Long id;
         public Long organizationId;
         public String name;
@@ -863,6 +868,136 @@ class Wave3StarterHotfixRegressionTest {
                         spec.factContractDigest(),
                         foreignFacts,
                         AuthzResourceGovernanceSpec.resolveFactStatuses(Map.of(), foreignFacts, spec, foreignOrg)
+                )
+        );
+    }
+
+    private static final class SampleOrgEntityProxy extends SampleOrgEntity implements HibernateProxy {
+        private final transient LazyInitializer lazyInitializer;
+
+        private SampleOrgEntityProxy(SampleOrgEntity target) {
+            this.lazyInitializer = (LazyInitializer) Proxy.newProxyInstance(
+                    SampleOrgEntityProxy.class.getClassLoader(),
+                    new Class<?>[]{LazyInitializer.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getImplementation", "initialize" -> target;
+                        case "getPersistentClass" -> SampleOrgEntity.class;
+                        case "getEntityName" -> SampleOrgEntity.class.getName();
+                        case "getIdentifier" -> target.id;
+                        case "isUninitialized" -> false;
+                        default -> null;
+                    }
+            );
+        }
+
+        @Override
+        public Object writeReplace() {
+            return this;
+        }
+
+        @Override
+        public LazyInitializer getHibernateLazyInitializer() {
+            return lazyInitializer;
+        }
+    }
+
+    @Test
+    void hibernateProxyEntitiesAreUnwrappedAcrossSpecAndInterceptor() {
+        AuthzResourceGovernanceSpec<SampleOrgEntity> spec = AuthzResourceGovernanceSpec
+                .<SampleOrgEntity>builder("workforce.proxy-orgs")
+                .serviceKey("workforce-svc")
+                .tenantField("organizationId")
+                .introspectFromResource(
+                        SampleOrgEntity.class,
+                        SampleOrgEntity.class,
+                        null,
+                        SampleOrgEntity.class,
+                        SampleOrgEntity.class,
+                        null,
+                        null
+                )
+                .build();
+
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("workforce-svc")
+                        .addResourceSpec(spec, SampleOrgEntity.class, SampleOrgEntity.class, SampleOrgEntity.class)
+                        .addOrganizationalScopePolicy(
+                                spec,
+                                "rule-workforce-proxy-orgs-scope",
+                                "resource.organizationId",
+                                "subject.organizationUnitIds",
+                                List.of(),
+                                List.of()
+                        )
+                        .build();
+
+        DriverManagerDataSource ds = new DriverManagerDataSource(
+                "jdbc:h2:mem:wave3_hibernate_proxy_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
+        MetadataResourceAuthorizationSeam seam = createSeam(
+                bundle,
+                new TransactionTemplate(new DataSourceTransactionManager(ds)),
+                jdbcTemplate
+        );
+
+        ThreadLocalAuthzCallerContextProvider callerProvider = new ThreadLocalAuthzCallerContextProvider();
+        AuthzGovernedResourceServiceSupport serviceSupport =
+                new AuthzGovernedResourceServiceSupport(seam, new DetachedDtoMaskingProcessor());
+        AuthzResourceGovernanceInterceptor interceptor =
+                new AuthzResourceGovernanceInterceptor(serviceSupport, callerProvider)
+                        .registerSpec(spec);
+
+        AuthzCallerContext callerCtx = new AuthzCallerContext(
+                "10",
+                Map.of(
+                        "subject.principalId", "user-1",
+                        "subject.organizationUnitIds", List.of(10L)
+                ),
+                Map.of(
+                        "subject.principalId", FactResolutionStatus.PRESENT,
+                        "subject.organizationUnitIds", FactResolutionStatus.PRESENT
+                ),
+                Set.of(),
+                Map.of(),
+                null,
+                null
+        );
+
+        SampleOrgEntity realTarget = new SampleOrgEntity();
+        realTarget.id = 42L;
+        realTarget.organizationId = 10L;
+        realTarget.name = "Proxy Resolved Dept";
+        SampleOrgEntityProxy proxy = new SampleOrgEntityProxy(realTarget);
+        // Raw superclass fields on the ByteBuddy-like proxy instance remain null.
+        assertNull(((SampleOrgEntity) proxy).organizationId);
+
+        spec.verifyEntityAccessAllowed(proxy, callerCtx, null);
+        Map<String, Object> targetFacts = spec.extractEntityTargetFacts(proxy);
+        assertEquals(10L, targetFacts.get("resource.organizationId"));
+        assertEquals("Proxy Resolved Dept", targetFacts.get("resource.name"));
+
+        var snapshot = spec.toResourceStateSnapshot(proxy);
+        assertEquals(10L, snapshot.metadata().get("resource.organizationId"));
+
+        BaseResourceQueryService<?, ?, ?> queryService = (BaseResourceQueryService<?, ?, ?>) Proxy.newProxyInstance(
+                Wave3StarterHotfixRegressionTest.class.getClassLoader(),
+                new Class<?>[]{BaseResourceQueryService.class},
+                (p, m, args) -> "getResourceKey".equals(m.getName()) ? "workforce.proxy-orgs" : null
+        );
+        callerProvider.runWithContext(
+                callerCtx,
+                () -> interceptor.verifyEntitiesAccess(queryService, List.of(proxy), AccessMode.READ)
+        );
+
+        SampleOrgEntity foreignTarget = new SampleOrgEntity();
+        foreignTarget.id = 43L;
+        foreignTarget.organizationId = 99L;
+        SampleOrgEntityProxy foreignProxy = new SampleOrgEntityProxy(foreignTarget);
+        assertThrows(
+                SecurityException.class,
+                () -> callerProvider.runWithContext(
+                        callerCtx,
+                        () -> interceptor.verifyEntitiesAccess(queryService, List.of(foreignProxy), AccessMode.READ)
                 )
         );
     }
