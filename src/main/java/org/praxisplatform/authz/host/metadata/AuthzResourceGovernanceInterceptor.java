@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.persistence.EmbeddedId;
+import jakarta.persistence.Id;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -60,6 +62,7 @@ import org.praxisplatform.uischema.stats.dto.TimeSeriesStatsRequest;
 import org.praxisplatform.uischema.stats.dto.TimeSeriesStatsResponse;
 import org.praxisplatform.uischema.stats.service.ResolvedStatsMetric;
 import org.praxisplatform.uischema.stats.service.StatsQueryExecutor;
+import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.Ordered;
@@ -67,8 +70,11 @@ import org.springframework.core.ResolvableType;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.convert.support.DefaultConversionService;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.ClassUtils;
 
 /**
@@ -149,9 +155,47 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         private Object capturedEntity;
 
         private SnapshotCaptureSlot(BaseResourceQueryService<?, ?, ?> expectedService) {
-            this.expectedService = expectedService;
+            this.expectedService = unwrapServiceTarget(expectedService);
         }
     }
+
+    private static final ClassValue<Optional<Function<Object, Object>>> JPA_ID_EXTRACTORS =
+            new ClassValue<>() {
+                @Override
+                protected Optional<Function<Object, Object>> computeValue(Class<?> type) {
+                    for (Class<?> curr = type; curr != null && curr != Object.class; curr = curr.getSuperclass()) {
+                        for (Field field : curr.getDeclaredFields()) {
+                            if (AnnotatedElementUtils.hasAnnotation(field, EmbeddedId.class)
+                                    || AnnotatedElementUtils.hasAnnotation(field, Id.class)) {
+                                field.setAccessible(true);
+                                return Optional.of(target -> {
+                                    try {
+                                        return field.get(target);
+                                    } catch (IllegalAccessException ex) {
+                                        return null;
+                                    }
+                                });
+                            }
+                        }
+                        for (Method method : curr.getDeclaredMethods()) {
+                            if (method.getParameterCount() == 0
+                                    && method.getReturnType() != void.class
+                                    && (AnnotatedElementUtils.hasAnnotation(method, EmbeddedId.class)
+                                            || AnnotatedElementUtils.hasAnnotation(method, Id.class))) {
+                                method.setAccessible(true);
+                                return Optional.of(target -> {
+                                    try {
+                                        return method.invoke(target);
+                                    } catch (ReflectiveOperationException ex) {
+                                        return null;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    return Optional.empty();
+                }
+            };
 
     private record ResolvedGovernanceMetadata(
             String resourceKey,
@@ -270,7 +314,8 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
                             return rawSpec.isCallerDestinationForSnapshot(snap, callerCtx);
                         },
                         spec.actionDecisionPoints(),
-                        spec.surfaceDecisionPoints()
+                        spec.surfaceDecisionPoints(),
+                        rawSpec::extractSnapshotTargetFactStatuses
                 )
         );
     }
@@ -404,18 +449,13 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
             evaluateTargetReadProjection(spec, unwrapped, callerCtx);
         }
         SnapshotCaptureSlot slot = snapshotCapture.get();
-        if (slot != null && slot.expectedService == service) {
+        if (slot != null && slot.expectedService == unwrapServiceTarget(service)) {
             slot.capturedEntity = unwrapped;
         }
         if (ResourceStateSnapshotScope.isOpen()) {
-            Object entityId = readPropertyQuietly(unwrapped, "id");
+            Object entityId = extractJpaEntityId(unwrapped);
             if (entityId != null) {
-                Map<String, ResourceStateSnapshot> cache = scopedSnapshotCache.get();
-                if (cache == null) {
-                    cache = new LinkedHashMap<>();
-                    scopedSnapshotCache.set(cache);
-                }
-                cache.put(scopedCacheKey(service, entityId), spec.toResourceStateSnapshot(unwrapped));
+                storeScopedCachedSnapshot(service, entityId, spec.toResourceStateSnapshot(unwrapped));
             }
         } else {
             scopedSnapshotCache.remove();
@@ -1017,33 +1057,27 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
                     ((BaseResourceQueryService) service).findResourceStateSnapshot(typedId);
             if (slot.capturedEntity != null) {
                 ResourceStateSnapshot specSnap = rawSpec.toResourceStateSnapshot(slot.capturedEntity);
-                if (serviceSnap == null || serviceSnap.isEmpty()) {
-                    return Optional.of(specSnap);
+                if (ResourceStateSnapshotScope.isOpen()) {
+                    storeScopedCachedSnapshot(service, typedId, specSnap);
                 }
-                ResourceStateSnapshot custom = serviceSnap.get();
-                Map<String, Object> mergedMeta = new LinkedHashMap<>(specSnap.metadata());
-                mergedMeta.putAll(custom.metadata());
-                String state = (custom.state() != null && !custom.state().isBlank())
-                        ? custom.state()
-                        : specSnap.state();
-                return Optional.of(ResourceStateSnapshot.of(state, mergedMeta));
+                return Optional.of(mergeSnapshots(specSnap, serviceSnap));
             }
             if (ResourceStateSnapshotScope.isOpen()) {
                 Map<String, ResourceStateSnapshot> cache = scopedSnapshotCache.get();
                 if (cache != null) {
                     ResourceStateSnapshot cached = cache.get(scopedCacheKey(service, typedId));
                     if (cached != null) {
-                        if (serviceSnap == null || serviceSnap.isEmpty()) {
-                            return Optional.of(cached);
-                        }
-                        ResourceStateSnapshot custom = serviceSnap.get();
-                        Map<String, Object> mergedMeta = new LinkedHashMap<>(cached.metadata());
-                        mergedMeta.putAll(custom.metadata());
-                        String state = (custom.state() != null && !custom.state().isBlank())
-                                ? custom.state()
-                                : cached.state();
-                        return Optional.of(ResourceStateSnapshot.of(state, mergedMeta));
+                        return Optional.of(mergeSnapshots(cached, serviceSnap));
                     }
+                }
+            }
+            if (serviceSnap != null && serviceSnap.isPresent()) {
+                ResourceStateSnapshot specSnap = loadSnapshotInReadOnlyTx(service, typedId, rawSpec);
+                if (specSnap != null) {
+                    if (ResourceStateSnapshotScope.isOpen()) {
+                        storeScopedCachedSnapshot(service, typedId, specSnap);
+                    }
+                    return Optional.of(mergeSnapshots(specSnap, serviceSnap));
                 }
             }
             return serviceSnap == null ? Optional.empty() : serviceSnap;
@@ -1054,8 +1088,152 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         }
     }
 
+    private void storeScopedCachedSnapshot(
+            BaseResourceQueryService<?, ?, ?> service,
+            Object id,
+            ResourceStateSnapshot snapshot
+    ) {
+        if (service == null || id == null || snapshot == null) {
+            return;
+        }
+        Map<String, ResourceStateSnapshot> cache = scopedSnapshotCache.get();
+        if (cache == null) {
+            cache = new LinkedHashMap<>();
+            scopedSnapshotCache.set(cache);
+        }
+        cache.put(scopedCacheKey(service, id), snapshot);
+    }
+
+    private static ResourceStateSnapshot mergeSnapshots(
+            ResourceStateSnapshot authzSnap,
+            Optional<ResourceStateSnapshot> customOpt
+    ) {
+        if (customOpt == null || customOpt.isEmpty()) {
+            return authzSnap;
+        }
+        ResourceStateSnapshot custom = customOpt.get();
+        Map<String, Object> mergedMeta = new LinkedHashMap<>(authzSnap.metadata());
+        mergedMeta.putAll(custom.metadata());
+        for (String key : List.of(
+                AuthzResourceGovernanceSpec.SNAPSHOT_TENANT_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_ORIGIN_VALUE_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_DESTINATION_VALUE_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_ENTITY_REF_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_ENRICHED_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_NULL_FACTS_META_KEY
+        )) {
+            if (authzSnap.metadata().containsKey(key)) {
+                mergedMeta.put(key, authzSnap.metadata().get(key));
+            }
+        }
+        String state = (custom.state() != null && !custom.state().isBlank())
+                ? custom.state()
+                : authzSnap.state();
+        return ResourceStateSnapshot.of(state, mergedMeta);
+    }
+
+    private ResourceStateSnapshot loadSnapshotInReadOnlyTx(
+            BaseResourceQueryService<?, ?, ?> service,
+            Object typedId,
+            AuthzResourceGovernanceSpec<Object> rawSpec
+    ) {
+        BaseResourceQueryService<?, ?, ?> targetService = unwrapServiceTarget(service);
+        if (!(targetService instanceof AbstractBaseQueryResourceService<?, ?, ?, ?> queryService)) {
+            return null;
+        }
+        java.util.function.Supplier<ResourceStateSnapshot> loader = () -> {
+            try {
+                Method findMethod = findMethodInHierarchy(
+                        AbstractBaseQueryResourceService.class,
+                        "findEntityById",
+                        1
+                );
+                if (findMethod == null) {
+                    return null;
+                }
+                findMethod.setAccessible(true);
+                Object loaded = findMethod.invoke(queryService, typedId);
+                return loaded == null ? null : rawSpec.toResourceStateSnapshot(loaded);
+            } catch (java.lang.reflect.InvocationTargetException ex) {
+                return null;
+            } catch (ReflectiveOperationException ex) {
+                return null;
+            }
+        };
+        if (TransactionSynchronizationManager.isActualTransactionActive() || applicationContext == null) {
+            return loader.get();
+        }
+        PlatformTransactionManager txManager = null;
+        try {
+            txManager = applicationContext.getBeanProvider(PlatformTransactionManager.class).getIfAvailable();
+        } catch (RuntimeException ignored) {
+            txManager = null;
+        }
+        if (txManager == null) {
+            return loader.get();
+        }
+        TransactionTemplate txTemplate = new TransactionTemplate(txManager);
+        txTemplate.setReadOnly(true);
+        txTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
+        try {
+            return txTemplate.execute(status -> loader.get());
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private static Method findMethodInHierarchy(Class<?> rootType, String name, int paramCount) {
+        for (Class<?> curr = rootType; curr != null && curr != Object.class; curr = curr.getSuperclass()) {
+            for (Method method : curr.getDeclaredMethods()) {
+                if (method.getName().equals(name)
+                        && method.getParameterCount() == paramCount
+                        && !method.isBridge()
+                        && !method.isSynthetic()) {
+                    return method;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object extractJpaEntityId(Object entity) {
+        if (entity == null) {
+            return null;
+        }
+        Object unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
+        Optional<Function<Object, Object>> extractor = JPA_ID_EXTRACTORS.get(ClassUtils.getUserClass(unwrapped));
+        if (extractor.isPresent()) {
+            Object val = extractor.get().apply(unwrapped);
+            if (val != null) {
+                return val;
+            }
+        }
+        return readPropertyQuietly(unwrapped, "id");
+    }
+
+    private static BaseResourceQueryService<?, ?, ?> unwrapServiceTarget(BaseResourceQueryService<?, ?, ?> service) {
+        Object current = service;
+        int depth = 0;
+        while (current != null && AopUtils.isAopProxy(current) && depth++ < 8) {
+            Object next = AopProxyUtils.getSingletonTarget(current);
+            if (next == null || next == current) {
+                break;
+            }
+            current = next;
+        }
+        return current instanceof BaseResourceQueryService<?, ?, ?> unwrapped ? unwrapped : service;
+    }
+
     private static String scopedCacheKey(BaseResourceQueryService<?, ?, ?> service, Object id) {
-        return System.identityHashCode(service) + ":" + String.valueOf(id);
+        String idKey;
+        if (id == null) {
+            idKey = "null";
+        } else if (CompositeIdSupport.isCompositeIdType(id.getClass())) {
+            idKey = CompositeIdSupport.stringify(id);
+        } else {
+            idKey = String.valueOf(id);
+        }
+        return System.identityHashCode(unwrapServiceTarget(service)) + ":" + idKey;
     }
 
     private static Object coerceServiceId(BaseResourceQueryService<?, ?, ?> service, Object rawId) {

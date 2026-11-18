@@ -166,6 +166,12 @@ public final class AuthzResourceGovernanceSpec<E> {
     /** Internal snapshot metadata key storing the source entity reference when custom custody predicates are configured ({@code P10.9-R01}). */
     public static final String SNAPSHOT_ENTITY_REF_META_KEY = "__authz.entityRef";
 
+    /** Internal snapshot metadata key marking snapshots enriched with host/OPA governance facts ({@code Wave 3}). */
+    public static final String SNAPSHOT_ENRICHED_META_KEY = "__authz.snapshotEnriched";
+
+    /** Internal snapshot metadata key listing {@code resource.*} paths whose entity value evaluated to {@code null} ({@code Wave 3}). */
+    public static final String SNAPSHOT_NULL_FACTS_META_KEY = "__authz.nullFactPaths";
+
     /** Tenant and organizational isolation metadata resolved from {@link AuthzTenantScope}. */
     public record TenantScopeSpec(
             AuthzTenantScopeMode mode,
@@ -1054,6 +1060,11 @@ public final class AuthzResourceGovernanceSpec<E> {
         if (originCustodyPredicate != null || destinationCustodyPredicate != null) {
             metadata.put(SNAPSHOT_ENTITY_REF_META_KEY, unwrapped);
         }
+        Map<String, FactResolutionStatus> nullStatuses = extractEntityTargetFactStatuses(unwrapped);
+        if (!nullStatuses.isEmpty()) {
+            metadata.put(SNAPSHOT_NULL_FACTS_META_KEY, List.copyOf(nullStatuses.keySet()));
+        }
+        metadata.put(SNAPSHOT_ENRICHED_META_KEY, Boolean.TRUE);
         return ResourceStateSnapshot.of(state, metadata);
     }
 
@@ -1080,12 +1091,47 @@ public final class AuthzResourceGovernanceSpec<E> {
                 facts.put(binding.fieldPath(), val);
             }
         }
+        Map<String, FactDescriptor> contractDescriptors =
+                factContract != null && factContract.descriptorsByPath() != null
+                        ? factContract.descriptorsByPath()
+                        : null;
         for (Map.Entry<String, Object> entry : meta.entrySet()) {
-            if (entry.getKey().startsWith("resource.") && entry.getValue() != null) {
-                facts.putIfAbsent(entry.getKey(), entry.getValue());
+            String key = entry.getKey();
+            if (key != null
+                    && key.startsWith("resource.")
+                    && entry.getValue() != null
+                    && (contractDescriptors == null || contractDescriptors.containsKey(key))) {
+                facts.putIfAbsent(key, entry.getValue());
             }
         }
         return Map.copyOf(facts);
+    }
+
+    /**
+     * Extracts canonical {@link FactResolutionStatus} entries for {@code resource.*} target facts
+     * resolved from a {@link ResourceStateSnapshot}, preserving {@link FactResolutionStatus#NULL}
+     * markers recorded by {@link #toResourceStateSnapshot(Object)} ({@code Wave 3}).
+     *
+     * @param snapshot resource state snapshot
+     * @return immutable map of {@code resource.*} fact resolution statuses
+     */
+    public Map<String, FactResolutionStatus> extractSnapshotTargetFactStatuses(ResourceStateSnapshot snapshot) {
+        if (snapshot == null) {
+            return Map.of();
+        }
+        Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
+        for (String key : extractSnapshotTargetFacts(snapshot).keySet()) {
+            statuses.put(key, FactResolutionStatus.PRESENT);
+        }
+        Object rawNullPaths = snapshot.metadata().get(SNAPSHOT_NULL_FACTS_META_KEY);
+        if (rawNullPaths instanceof Collection<?> nullPaths) {
+            for (Object item : nullPaths) {
+                if (item instanceof String path && !path.isBlank()) {
+                    statuses.putIfAbsent(path, FactResolutionStatus.NULL);
+                }
+            }
+        }
+        return statuses.isEmpty() ? Map.of() : Map.copyOf(statuses);
     }
 
     /**

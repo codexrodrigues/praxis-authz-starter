@@ -1054,6 +1054,7 @@ public final class MetadataResourceAuthorizationSeam {
                 case "caller-context-missing", "AUTHZ_CALLER_CONTEXT_MISSING", "AUTHZ_CONTEXT_MISSING" -> "CALLER_CONTEXT_MISSING";
                 case "resource-state-not-found", "resource-state-unavailable" -> "RESOURCE_STATE_UNAVAILABLE";
                 case "hard-scope-tenant-mismatch" -> "TENANT_HARD_SCOPE_MISMATCH";
+                case "consolidation-read-only-scope" -> "CONSOLIDATION_READ_ONLY_SCOPE";
                 case "dual-scope-cedente-custody-required", "dual-scope-custody-denied" -> "DUAL_SCOPE_CUSTODY_DENIED";
                 case "policy-gate-denied", "AUTHZ_POLICY_DENIED" -> "POLICY_GATE_DENIED";
                 case "field-write-denied" -> "FIELD_WRITE_DENIED";
@@ -1153,6 +1154,54 @@ public final class MetadataResourceAuthorizationSeam {
             Map<String, Object> trustedItemTargetFacts,
             Map<String, FactResolutionStatus> trustedItemTargetFactStatuses
     ) {
+        boolean inferredVerified = (trustedItemTargetFacts != null && !trustedItemTargetFacts.isEmpty())
+                || (trustedItemTargetFactStatuses != null && !trustedItemTargetFactStatuses.isEmpty());
+        String normalizedOp = operationId == null ? "" : operationId.trim().toLowerCase(java.util.Locale.ROOT);
+        boolean inferredReadOnly = (modifiedAttributeIds == null || modifiedAttributeIds.isEmpty())
+                && ("view".equals(normalizedOp)
+                || "detail".equals(normalizedOp)
+                || "filter".equals(normalizedOp)
+                || "export".equals(normalizedOp));
+        return evaluateOperationAvailability(
+                decisionPoint,
+                factContractDigest,
+                operationId,
+                itemScope,
+                modifiedAttributeIds,
+                dualScopeSpec,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                trustedSubjectFacts,
+                trustedSubjectFactStatuses,
+                trustedItemTargetFacts,
+                trustedItemTargetFactStatuses,
+                inferredVerified,
+                inferredReadOnly
+        );
+    }
+
+    /**
+     * Evaluates live contextual availability with explicit {@code itemStateVerified} and
+     * {@code readOnlyOperation} markers, allowing shared-catalog ({@code AUTHENTICATED_SHARED})
+     * items with empty {@code resource.*} target facts and non-standard read surfaces (e.g.,
+     * {@code ficha-cadastral}) to evaluate cleanly after host snapshot resolution ({@code Wave 3}).
+     */
+    public OperationAvailabilityEvaluation evaluateOperationAvailability(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            String operationId,
+            boolean itemScope,
+            Set<String> modifiedAttributeIds,
+            DualScopeDelegationSpec dualScopeSpec,
+            boolean callerMatchesCedente,
+            boolean callerMatchesCessionario,
+            Map<String, Object> trustedSubjectFacts,
+            Map<String, FactResolutionStatus> trustedSubjectFactStatuses,
+            Map<String, Object> trustedItemTargetFacts,
+            Map<String, FactResolutionStatus> trustedItemTargetFactStatuses,
+            boolean itemStateVerified,
+            boolean readOnlyOperation
+    ) {
         Objects.requireNonNull(decisionPoint, "decisionPoint is required");
         Objects.requireNonNull(factContractDigest, "factContractDigest is required");
         String pointKey = decisionPoint.identity().pointKey();
@@ -1160,7 +1209,7 @@ public final class MetadataResourceAuthorizationSeam {
         String scopeLabel = itemScope ? "ITEM" : "COLLECTION";
         String custodyRole = resolveDualScopeCustodyRole(dualScopeSpec, callerMatchesCedente, callerMatchesCessionario);
 
-        if (itemScope && (trustedItemTargetFacts == null || trustedItemTargetFacts.isEmpty())) {
+        if (itemScope && !itemStateVerified) {
             return new OperationAvailabilityEvaluation(
                     evaluateAdvisoryAvailability(pointKey, false, "unobserved"),
                     "resource-state-unavailable",
@@ -1185,7 +1234,8 @@ public final class MetadataResourceAuthorizationSeam {
             ));
         }
         boolean readOnlyDiscoveryOp = syntheticChanges.isEmpty()
-                && ("view".equals(normalizedOp)
+                && (readOnlyOperation
+                || "view".equals(normalizedOp)
                 || "detail".equals(normalizedOp)
                 || "filter".equals(normalizedOp)
                 || "export".equals(normalizedOp));
@@ -1325,10 +1375,12 @@ public final class MetadataResourceAuthorizationSeam {
         if (trustedSubjectFactStatuses != null) {
             mergedStatuses.putAll(trustedSubjectFactStatuses);
         }
-        mergedFacts.putAll(trustedItemTargetFacts);
+        if (trustedItemTargetFacts != null && !trustedItemTargetFacts.isEmpty()) {
+            mergedFacts.putAll(trustedItemTargetFacts);
+        }
         if (trustedItemTargetFactStatuses != null) {
             mergedStatuses.putAll(trustedItemTargetFactStatuses);
-        } else {
+        } else if (trustedItemTargetFacts != null) {
             for (String key : trustedItemTargetFacts.keySet()) {
                 mergedStatuses.putIfAbsent(key, FactResolutionStatus.PRESENT);
             }

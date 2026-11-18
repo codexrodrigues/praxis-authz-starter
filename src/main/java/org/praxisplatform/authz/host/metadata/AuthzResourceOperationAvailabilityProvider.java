@@ -1,6 +1,7 @@
 package org.praxisplatform.authz.host.metadata;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -28,6 +29,7 @@ import org.praxisplatform.uischema.capability.ResourceStateSnapshotProvider;
 import org.praxisplatform.uischema.surface.SurfaceAvailabilityContext;
 import org.praxisplatform.uischema.surface.SurfaceAvailabilityRule;
 import org.praxisplatform.uischema.surface.SurfaceDefinition;
+import org.praxisplatform.uischema.surface.SurfaceKind;
 import org.praxisplatform.uischema.surface.SurfaceScope;
 
 /**
@@ -62,7 +64,8 @@ public final class AuthzResourceOperationAvailabilityProvider
             boolean callerMatchesCessionario,
             String tenantId,
             Set<String> allowedHardScopeValues,
-            boolean sharedUnrestrictedScope
+            boolean sharedUnrestrictedScope,
+            boolean readOnlyConsolidation
     ) {
         /** Compact constructor enforcing non-null maps. */
         public CallerAvailabilityFactContext {
@@ -71,6 +74,28 @@ public final class AuthzResourceOperationAvailabilityProvider
                     ? Map.of()
                     : Map.copyOf(trustedSubjectFactStatuses);
             allowedHardScopeValues = allowedHardScopeValues == null ? null : Set.copyOf(allowedHardScopeValues);
+        }
+
+        /** Backward-compatible 7-argument constructor. */
+        public CallerAvailabilityFactContext(
+                Map<String, Object> trustedSubjectFacts,
+                Map<String, FactResolutionStatus> trustedSubjectFactStatuses,
+                boolean callerMatchesCedente,
+                boolean callerMatchesCessionario,
+                String tenantId,
+                Set<String> allowedHardScopeValues,
+                boolean sharedUnrestrictedScope
+        ) {
+            this(
+                    trustedSubjectFacts,
+                    trustedSubjectFactStatuses,
+                    callerMatchesCedente,
+                    callerMatchesCessionario,
+                    tenantId,
+                    allowedHardScopeValues,
+                    sharedUnrestrictedScope,
+                    false
+            );
         }
 
         /** Builds caller availability context resolving multi-org hard-scope values from {@code spec}. */
@@ -105,7 +130,8 @@ public final class AuthzResourceOperationAvailabilityProvider
                     callerMatchesDestination,
                     callerCtx.tenantId(),
                     allowed,
-                    shared
+                    shared,
+                    selection.readOnlyConsolidation()
             );
         }
 
@@ -169,7 +195,8 @@ public final class AuthzResourceOperationAvailabilityProvider
             BiFunction<CallerAvailabilityFactContext, ResourceStateSnapshot, Boolean> itemCedenteEvaluator,
             BiFunction<CallerAvailabilityFactContext, ResourceStateSnapshot, Boolean> itemCessionarioEvaluator,
             Map<String, DecisionPointDescriptor> actionDecisionPoints,
-            Map<String, DecisionPointDescriptor> surfaceDecisionPoints
+            Map<String, DecisionPointDescriptor> surfaceDecisionPoints,
+            Function<ResourceStateSnapshot, Map<String, FactResolutionStatus>> snapshotTargetFactStatusExtractor
     ) {
         /** Compact constructor enforcing required fields. */
         public ResourceAvailabilityPolicyBinding {
@@ -187,6 +214,38 @@ public final class AuthzResourceOperationAvailabilityProvider
             surfaceDecisionPoints = surfaceDecisionPoints == null
                     ? Map.of()
                     : Map.copyOf(surfaceDecisionPoints);
+        }
+
+        /** Backward-compatible 12-argument constructor. */
+        public ResourceAvailabilityPolicyBinding(
+                String resourceKey,
+                DecisionPointDescriptor decisionPoint,
+                String factContractDigest,
+                DualScopeDelegationSpec dualScopeSpec,
+                Map<String, Set<String>> operationModifiedAttributes,
+                Supplier<CallerAvailabilityFactContext> callerContextSupplier,
+                Function<ResourceStateSnapshot, Map<String, Object>> snapshotTargetFactExtractor,
+                Function<Object, Optional<ResourceStateSnapshot>> itemSnapshotResolver,
+                BiFunction<CallerAvailabilityFactContext, ResourceStateSnapshot, Boolean> itemCedenteEvaluator,
+                BiFunction<CallerAvailabilityFactContext, ResourceStateSnapshot, Boolean> itemCessionarioEvaluator,
+                Map<String, DecisionPointDescriptor> actionDecisionPoints,
+                Map<String, DecisionPointDescriptor> surfaceDecisionPoints
+        ) {
+            this(
+                    resourceKey,
+                    decisionPoint,
+                    factContractDigest,
+                    dualScopeSpec,
+                    operationModifiedAttributes,
+                    callerContextSupplier,
+                    snapshotTargetFactExtractor,
+                    itemSnapshotResolver,
+                    itemCedenteEvaluator,
+                    itemCessionarioEvaluator,
+                    actionDecisionPoints,
+                    surfaceDecisionPoints,
+                    null
+            );
         }
 
         /** Backward-compatible 10-argument constructor. */
@@ -431,11 +490,13 @@ public final class AuthzResourceOperationAvailabilityProvider
             ResourceStateSnapshot snapshot = itemScope
                     ? resolveSnapshotIfNeeded(binding, context.resourceKey(), context.resourceId(), context.resourceState())
                     : null;
+            boolean mutating = isMutatingOperation(context, binding);
             return evaluateInternal(
                     binding,
                     binding.resolveDecisionPoint(context.operationId()),
                     context.operationId(),
                     itemScope,
+                    mutating,
                     snapshot
             );
         }
@@ -458,6 +519,7 @@ public final class AuthzResourceOperationAvailabilityProvider
                     binding.resolveActionDecisionPoint(definition.id()),
                     definition.id(),
                     itemScope,
+                    true,
                     snapshot
             );
         }
@@ -488,11 +550,14 @@ public final class AuthzResourceOperationAvailabilityProvider
                 ? resolveSnapshotIfNeeded(binding, definition.resourceKey(), context.resourceId(), context.resourceState())
                 : null;
         if (binding != null) {
+            boolean mutatingSurface = definition.kind() == SurfaceKind.FORM
+                    || definition.kind() == SurfaceKind.PARTIAL_FORM;
             return evaluateInternal(
                     binding,
                     binding.resolveSurfaceDecisionPoint(definition.id()),
                     definition.id(),
                     itemScope,
+                    mutatingSurface,
                     snapshot
             );
         }
@@ -549,6 +614,58 @@ public final class AuthzResourceOperationAvailabilityProvider
         return AvailabilityDecision.deny("AUTHZ_DECISION_POINT_UNMAPPED", Map.of());
     }
 
+    private static boolean isMutatingOperation(
+            ResourceOperationAvailabilityContext context,
+            ResourceAvailabilityPolicyBinding binding
+    ) {
+        String rawOp = context.operationId();
+        String op = rawOp == null ? "" : rawOp.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("create".equals(op)
+                || "edit".equals(op)
+                || "update".equals(op)
+                || "patch".equals(op)
+                || "delete".equals(op)
+                || "duplicate-draft".equals(op)
+                || op.startsWith("bulk")) {
+            return true;
+        }
+        if ("view".equals(op)
+                || "detail".equals(op)
+                || "filter".equals(op)
+                || "list".equals(op)
+                || "export".equals(op)
+                || "stats".equals(op)
+                || "options".equals(op)
+                || "schemas".equals(op)) {
+            return false;
+        }
+        Object preferredMethod = context.metadata().get("preferredMethod");
+        if (preferredMethod != null) {
+            String method = String.valueOf(preferredMethod).trim().toUpperCase(java.util.Locale.ROOT);
+            if ("GET".equals(method) || "HEAD".equals(method)) {
+                return false;
+            }
+            if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method) || "DELETE".equals(method)) {
+                return true;
+            }
+        }
+        if (rawOp != null && binding != null) {
+            if (binding.actionDecisionPoints().containsKey(rawOp)) {
+                return true;
+            }
+            DecisionPointDescriptor surfaceDp = binding.surfaceDecisionPoints().get(rawOp);
+            if (surfaceDp != null && surfaceDp.httpMethod() != null) {
+                String m = surfaceDp.httpMethod().trim().toUpperCase(java.util.Locale.ROOT);
+                return !("GET".equals(m) || "HEAD".equals(m));
+            }
+            Set<String> modified = binding.operationModifiedAttributes().get(rawOp);
+            if (modified != null && !modified.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private ResourceStateSnapshot resolveSnapshotIfNeeded(
             ResourceAvailabilityPolicyBinding binding,
             String resourceKey,
@@ -556,7 +673,17 @@ public final class AuthzResourceOperationAvailabilityProvider
             ResourceStateSnapshot existingSnapshot
     ) {
         if (existingSnapshot != null) {
-            return existingSnapshot;
+            if (Boolean.TRUE.equals(existingSnapshot.metadata().get(AuthzResourceGovernanceSpec.SNAPSHOT_ENRICHED_META_KEY))
+                    || resourceId == null
+                    || binding == null
+                    || binding.itemSnapshotResolver() == null) {
+                return existingSnapshot;
+            }
+            Optional<ResourceStateSnapshot> resolved = binding.itemSnapshotResolver().apply(resourceId);
+            if (resolved == null || resolved.isEmpty()) {
+                return null;
+            }
+            return mergeEnrichedSnapshot(resolved.get(), existingSnapshot);
         }
         if (resourceId == null) {
             return null;
@@ -574,11 +701,36 @@ public final class AuthzResourceOperationAvailabilityProvider
         return resolved.orElse(null);
     }
 
+    private static ResourceStateSnapshot mergeEnrichedSnapshot(
+            ResourceStateSnapshot authzSnapshot,
+            ResourceStateSnapshot hostSnapshot
+    ) {
+        Map<String, Object> mergedMeta = new LinkedHashMap<>(authzSnapshot.metadata());
+        mergedMeta.putAll(hostSnapshot.metadata());
+        for (String key : List.of(
+                AuthzResourceGovernanceSpec.SNAPSHOT_TENANT_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_ORIGIN_VALUE_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_DESTINATION_VALUE_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_ENTITY_REF_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_ENRICHED_META_KEY,
+                AuthzResourceGovernanceSpec.SNAPSHOT_NULL_FACTS_META_KEY
+        )) {
+            if (authzSnapshot.metadata().containsKey(key)) {
+                mergedMeta.put(key, authzSnapshot.metadata().get(key));
+            }
+        }
+        String state = (hostSnapshot.state() != null && !hostSnapshot.state().isBlank())
+                ? hostSnapshot.state()
+                : authzSnapshot.state();
+        return ResourceStateSnapshot.of(state, mergedMeta);
+    }
+
     private AvailabilityDecision evaluateInternal(
             ResourceAvailabilityPolicyBinding binding,
             DecisionPointDescriptor effectiveDecisionPoint,
             String operationId,
             boolean itemScope,
+            boolean mutatingOperation,
             ResourceStateSnapshot snapshot
     ) {
         if (itemScope && snapshot == null
@@ -673,6 +825,26 @@ public final class AuthzResourceOperationAvailabilityProvider
             }
         }
 
+        if (mutatingOperation && callerCtx.readOnlyConsolidation()) {
+            Map<String, Object> consolidationMeta = new LinkedHashMap<>();
+            consolidationMeta.put("decisionPointKey", effectiveDecisionPoint.identity().pointKey());
+            if (operationId != null && !operationId.isBlank()) {
+                consolidationMeta.put("operationId", operationId);
+            }
+            consolidationMeta.put("evaluationScope", itemScope ? "ITEM" : "COLLECTION");
+            consolidationMeta.put("advisoryOnly", true);
+            consolidationMeta.put("requiresRuntimeRevalidation", true);
+            consolidationMeta.put("revalidatedOnExecution", true);
+            consolidationMeta.put(
+                    "denialCategory",
+                    OperationAvailabilityEvaluation.classifyDenialCategory("consolidation-read-only-scope")
+            );
+            return AvailabilityDecision.deny(
+                    "consolidation-read-only-scope",
+                    Map.copyOf(consolidationMeta)
+            );
+        }
+
         Set<String> modifiedAttributes = binding.operationModifiedAttributes()
                 .getOrDefault(operationId == null ? "" : operationId, Set.of());
 
@@ -682,6 +854,15 @@ public final class AuthzResourceOperationAvailabilityProvider
             Map<String, Object> extracted = binding.snapshotTargetFactExtractor().apply(snapshot);
             if (extracted != null && !extracted.isEmpty()) {
                 itemFacts = Map.copyOf(extracted);
+            }
+            if (binding.snapshotTargetFactStatusExtractor() != null) {
+                Map<String, FactResolutionStatus> extractedStatuses =
+                        binding.snapshotTargetFactStatusExtractor().apply(snapshot);
+                if (extractedStatuses != null && !extractedStatuses.isEmpty()) {
+                    itemStatuses = Map.copyOf(extractedStatuses);
+                }
+            }
+            if (itemStatuses.isEmpty() && !itemFacts.isEmpty()) {
                 Map<String, FactResolutionStatus> statuses = new LinkedHashMap<>();
                 for (String key : itemFacts.keySet()) {
                     statuses.put(key, FactResolutionStatus.PRESENT);
@@ -703,6 +884,9 @@ public final class AuthzResourceOperationAvailabilityProvider
                         && !effectiveDecisionPoint.factContractRef().factContractDigest().isBlank())
                 ? effectiveDecisionPoint.factContractRef().factContractDigest()
                 : binding.factContractDigest();
+
+        boolean itemStateVerified = !itemScope || snapshot != null;
+        boolean readOnlyOperation = !mutatingOperation;
 
         // P10.16-R01: When evaluating an ITEM-scoped custom @WorkflowAction or @UiSurface with its own
         // DecisionPointDescriptor, verify that the item first satisfies the primary resource decision point's
@@ -726,7 +910,9 @@ public final class AuthzResourceOperationAvailabilityProvider
                     callerCtx.trustedSubjectFacts(),
                     callerCtx.trustedSubjectFactStatuses(),
                     itemFacts,
-                    itemStatuses
+                    itemStatuses,
+                    itemStateVerified,
+                    true
             );
             if (!primaryGateEval.advisory().allowedInDiscovery()) {
                 OperationAvailabilityEvaluation deniedByPrimary = new OperationAvailabilityEvaluation(
@@ -764,7 +950,9 @@ public final class AuthzResourceOperationAvailabilityProvider
                 callerCtx.trustedSubjectFacts(),
                 callerCtx.trustedSubjectFactStatuses(),
                 itemFacts,
-                itemStatuses
+                itemStatuses,
+                itemStateVerified,
+                readOnlyOperation
         );
 
         Map<String, Object> decisionMetadata = eval.toSanitizedDecisionMetadata();

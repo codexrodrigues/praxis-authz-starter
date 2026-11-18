@@ -10,17 +10,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
 import java.lang.reflect.Proxy;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import org.aopalliance.intercept.MethodInterceptor;
+import org.hibernate.jpa.HibernatePersistenceProvider;
 import org.hibernate.proxy.HibernateProxy;
 import org.hibernate.proxy.LazyInitializer;
 import org.junit.jupiter.api.Test;
 import org.praxisplatform.authz.autoconfigure.PraxisAuthzHostBridgeAutoConfiguration;
+import org.praxisplatform.authz.contracts.annotation.AuthzTenantScope;
 import org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode;
 import org.praxisplatform.authz.contracts.context.FactCardinality;
 import org.praxisplatform.authz.contracts.context.FactPresenceModel;
@@ -56,6 +65,7 @@ import org.praxisplatform.authz.host.metadata.AuthzGovernedResourceServiceSuppor
 import org.praxisplatform.authz.host.metadata.AuthzHostPolicyBootstrapBuilder;
 import org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceInterceptor;
 import org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec;
+import org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityProvider;
 import org.praxisplatform.authz.host.metadata.PraxisAuthzExceptionHandler;
 import org.praxisplatform.authz.host.metadata.ThreadLocalAuthzCallerContextProvider;
 import org.praxisplatform.authz.opa.client.OpaAuthorizationProviderAdapter;
@@ -63,18 +73,43 @@ import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
 import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
 import org.praxisplatform.authz.telemetry.SanitizedAuthorizationTelemetryPublisher;
+import org.praxisplatform.uischema.action.ActionAvailabilityContext;
+import org.praxisplatform.uischema.action.ActionDefinition;
+import org.praxisplatform.uischema.action.ActionExecutionContract;
+import org.praxisplatform.uischema.action.ActionScope;
+import org.praxisplatform.uischema.capability.AvailabilityDecision;
+import org.praxisplatform.uischema.capability.ResourceOperationAvailabilityContext;
+import org.praxisplatform.uischema.capability.ResourceStateSnapshot;
+import org.praxisplatform.uischema.capability.ResourceStateSnapshotScope;
+import org.praxisplatform.uischema.filter.dto.GenericFilterDTO;
+import org.praxisplatform.uischema.filter.specification.GenericSpecificationsBuilder;
 import org.praxisplatform.uischema.governance.AccessMode;
 import org.praxisplatform.uischema.mapper.base.ResourceMapper;
+import org.praxisplatform.uischema.repository.base.BaseCrudRepository;
+import org.praxisplatform.uischema.service.base.AbstractBaseResourceService;
 import org.praxisplatform.uischema.service.base.BaseResourceQueryService;
+import org.praxisplatform.uischema.surface.SurfaceAvailabilityContext;
+import org.praxisplatform.uischema.surface.SurfaceDefinition;
+import org.praxisplatform.uischema.surface.SurfaceKind;
+import org.praxisplatform.uischema.surface.SurfaceResponseCardinality;
+import org.praxisplatform.uischema.surface.SurfaceScope;
+import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.data.jpa.repository.support.JpaRepositoryFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.orm.jpa.JpaTransactionManager;
+import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
+import org.springframework.orm.jpa.SharedEntityManagerCreator;
+import org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -1000,5 +1035,470 @@ class Wave3StarterHotfixRegressionTest {
                         () -> interceptor.verifyEntitiesAccess(queryService, List.of(foreignProxy), AccessMode.READ)
                 )
         );
+    }
+
+    @Entity(name = "Wave3Beta7BenefitsCaseEntity")
+    @Table(name = "wave3_beta7_benefits_cases")
+    @AuthzTenantScope(mode = AuthzTenantScopeMode.ORGANIZATIONAL_UNIT, tenantField = "organizationId")
+    public static class Beta7BenefitsCaseEntity {
+        @Id
+        public Long id;
+        public Long organizationId;
+        public String processNumber;
+        public String workflowStatus;
+
+        public Beta7BenefitsCaseEntity() {
+        }
+    }
+
+    @Entity(name = "Wave3Beta7EmployeeProfileEntity")
+    @Table(name = "wave3_beta7_employee_profiles")
+    @AuthzTenantScope(mode = AuthzTenantScopeMode.AUTHENTICATED_SHARED)
+    public static class Beta7EmployeeProfileEntity {
+        @Id
+        public Long employeeNumber;
+        public String fullName;
+
+        public Beta7EmployeeProfileEntity() {
+        }
+    }
+
+    public static class Beta7CaseFilter implements GenericFilterDTO {
+    }
+
+    public interface Beta7BenefitsCaseRepo extends BaseCrudRepository<Beta7BenefitsCaseEntity, Long> {
+    }
+
+    public interface Beta7EmployeeProfileRepo extends BaseCrudRepository<Beta7EmployeeProfileEntity, Long> {
+    }
+
+    public static class Beta7BenefitsCaseService extends AbstractBaseResourceService<
+            Beta7BenefitsCaseEntity,
+            Beta7BenefitsCaseEntity,
+            Long,
+            Beta7CaseFilter,
+            Beta7BenefitsCaseEntity,
+            Beta7BenefitsCaseEntity> {
+
+        private final ResourceMapper<
+                Beta7BenefitsCaseEntity,
+                Beta7BenefitsCaseEntity,
+                Beta7BenefitsCaseEntity,
+                Beta7BenefitsCaseEntity,
+                Long> mapper = new ResourceMapper<>() {
+            @Override
+            public Beta7BenefitsCaseEntity toResponse(Beta7BenefitsCaseEntity entity) {
+                return entity;
+            }
+
+            @Override
+            public Beta7BenefitsCaseEntity newEntity(Beta7BenefitsCaseEntity dto) {
+                return dto;
+            }
+
+            @Override
+            public void applyUpdate(Beta7BenefitsCaseEntity entity, Beta7BenefitsCaseEntity dto) {
+                entity.workflowStatus = dto.workflowStatus;
+            }
+
+            @Override
+            public Long extractId(Beta7BenefitsCaseEntity entity) {
+                return entity.id;
+            }
+        };
+
+        public Beta7BenefitsCaseService(Beta7BenefitsCaseRepo repository) {
+            super(repository, new GenericSpecificationsBuilder<>(), Beta7BenefitsCaseEntity.class);
+        }
+
+        @Override
+        protected ResourceMapper<
+                Beta7BenefitsCaseEntity,
+                Beta7BenefitsCaseEntity,
+                Beta7BenefitsCaseEntity,
+                Beta7BenefitsCaseEntity,
+                Long> getResourceMapper() {
+            return mapper;
+        }
+
+        @Override
+        protected String resolveResourceKey() {
+            return "workforce.benefits-cases";
+        }
+
+        @Override
+        protected Optional<ResourceStateSnapshot> toResourceStateSnapshot(Beta7BenefitsCaseEntity entity) {
+            // Mirrors host services adding resource.legalBasis display keys not declared in FactContract
+            return Optional.of(ResourceStateSnapshot.of(
+                    entity.workflowStatus,
+                    Map.of(
+                            "resource.legalBasis", "Statute Art. 40",
+                            "action.homologate.allowed", "DRAFT".equals(entity.workflowStatus)
+                    )
+            ));
+        }
+
+        @Override
+        public Optional<ResourceStateSnapshot> findResourceStateSnapshot(Long id) {
+            return super.findResourceStateSnapshot(id);
+        }
+    }
+
+    public static class Beta7EmployeeProfileService extends AbstractBaseResourceService<
+            Beta7EmployeeProfileEntity,
+            Beta7EmployeeProfileEntity,
+            Long,
+            Beta7CaseFilter,
+            Beta7EmployeeProfileEntity,
+            Beta7EmployeeProfileEntity> {
+
+        private final ResourceMapper<
+                Beta7EmployeeProfileEntity,
+                Beta7EmployeeProfileEntity,
+                Beta7EmployeeProfileEntity,
+                Beta7EmployeeProfileEntity,
+                Long> mapper = new ResourceMapper<>() {
+            @Override
+            public Beta7EmployeeProfileEntity toResponse(Beta7EmployeeProfileEntity entity) {
+                return entity;
+            }
+
+            @Override
+            public Beta7EmployeeProfileEntity newEntity(Beta7EmployeeProfileEntity dto) {
+                return dto;
+            }
+
+            @Override
+            public void applyUpdate(Beta7EmployeeProfileEntity entity, Beta7EmployeeProfileEntity dto) {
+                entity.fullName = dto.fullName;
+            }
+
+            @Override
+            public Long extractId(Beta7EmployeeProfileEntity entity) {
+                return entity.employeeNumber;
+            }
+        };
+
+        public Beta7EmployeeProfileService(Beta7EmployeeProfileRepo repository) {
+            super(repository, new GenericSpecificationsBuilder<>(), Beta7EmployeeProfileEntity.class);
+        }
+
+        @Override
+        protected ResourceMapper<
+                Beta7EmployeeProfileEntity,
+                Beta7EmployeeProfileEntity,
+                Beta7EmployeeProfileEntity,
+                Beta7EmployeeProfileEntity,
+                Long> getResourceMapper() {
+            return mapper;
+        }
+
+        @Override
+        protected String resolveResourceKey() {
+            return "workforce.employee-profiles";
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void cglibProxiedServicesResolveSnapshotsWithPreResolvedCustomMetadataNonIdPkAndReadOnlyConsolidation() {
+        String dbName = "wave3_beta7_avail_" + UUID.randomUUID().toString().replace("-", "");
+        DriverManagerDataSource ds = new DriverManagerDataSource(
+                "jdbc:h2:mem:" + dbName + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1", "sa", "");
+        LocalContainerEntityManagerFactoryBean emfBean = new LocalContainerEntityManagerFactoryBean();
+        emfBean.setDataSource(ds);
+        emfBean.setPackagesToScan(Wave3StarterHotfixRegressionTest.class.getPackageName());
+        emfBean.setPersistenceProviderClass(HibernatePersistenceProvider.class);
+        emfBean.setJpaVendorAdapter(new HibernateJpaVendorAdapter());
+        Properties jpaProps = new Properties();
+        jpaProps.setProperty("hibernate.hbm2ddl.auto", "create-drop");
+        jpaProps.setProperty("hibernate.dialect", "org.hibernate.dialect.H2Dialect");
+        emfBean.setJpaProperties(jpaProps);
+        emfBean.afterPropertiesSet();
+
+        var emf = emfBean.getObject();
+        assertNotNull(emf);
+        JpaTransactionManager txManager = new JpaTransactionManager(emf);
+        TransactionTemplate txTemplate = new TransactionTemplate(txManager);
+        EntityManager sharedEm = SharedEntityManagerCreator.createSharedEntityManager(emf);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
+        JpaRepositoryFactory repoFactory = new JpaRepositoryFactory(sharedEm);
+        Beta7BenefitsCaseRepo caseRepo = repoFactory.getRepository(Beta7BenefitsCaseRepo.class);
+        Beta7EmployeeProfileRepo profileRepo = repoFactory.getRepository(Beta7EmployeeProfileRepo.class);
+
+        txTemplate.executeWithoutResult(status -> {
+            Beta7BenefitsCaseEntity inScopeCase = new Beta7BenefitsCaseEntity();
+            inScopeCase.id = 101L;
+            inScopeCase.organizationId = 10L;
+            inScopeCase.processNumber = "PROC-101";
+            inScopeCase.workflowStatus = "DRAFT";
+            caseRepo.save(inScopeCase);
+
+            Beta7BenefitsCaseEntity outOfScopeCase = new Beta7BenefitsCaseEntity();
+            outOfScopeCase.id = 102L;
+            outOfScopeCase.organizationId = 99L;
+            outOfScopeCase.processNumber = "PROC-102";
+            outOfScopeCase.workflowStatus = "DRAFT";
+            caseRepo.save(outOfScopeCase);
+
+            Beta7EmployeeProfileEntity profile = new Beta7EmployeeProfileEntity();
+            profile.employeeNumber = 900212L;
+            profile.fullName = "Helena Vasconcellos";
+            profileRepo.save(profile);
+        });
+
+        AuthzResourceGovernanceSpec<Beta7BenefitsCaseEntity> caseSpec =
+                AuthzResourceGovernanceSpec.<Beta7BenefitsCaseEntity>builder("workforce.benefits-cases")
+                        .serviceKey("workforce-svc")
+                        .tenantField("organizationId")
+                        .workflowAction("homologate", Set.of())
+                        .uiSurface("detail", "GET", "/api/workforce/benefits-cases/{id}/surfaces/detail")
+                        .uiSurface("review-form", "PATCH", "/api/workforce/benefits-cases/{id}/review-form")
+                        .introspectFromResource(
+                                Beta7BenefitsCaseEntity.class,
+                                Beta7BenefitsCaseEntity.class,
+                                Beta7CaseFilter.class,
+                                Beta7BenefitsCaseEntity.class,
+                                Beta7BenefitsCaseEntity.class,
+                                null,
+                                null
+                        )
+                        .build();
+
+        AuthzResourceGovernanceSpec<Beta7EmployeeProfileEntity> profileSpec =
+                AuthzResourceGovernanceSpec.<Beta7EmployeeProfileEntity>builder("workforce.employee-profiles")
+                        .serviceKey("workforce-svc")
+                        .uiSurface("profile-sheet", "GET", "/api/workforce/employee-profiles/{id}/surfaces/profile-sheet")
+                        .introspectFromResource(
+                                Beta7EmployeeProfileEntity.class,
+                                Beta7EmployeeProfileEntity.class,
+                                Beta7CaseFilter.class,
+                                Beta7EmployeeProfileEntity.class,
+                                Beta7EmployeeProfileEntity.class,
+                                null,
+                                null
+                        )
+                        .build();
+
+        Map<String, Object> principalPresent = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
+
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("workforce-svc")
+                        .addResourceSpec(caseSpec, Beta7BenefitsCaseEntity.class, Beta7BenefitsCaseEntity.class, Beta7BenefitsCaseEntity.class)
+                        .addOrganizationalScopePolicy(
+                                caseSpec,
+                                "rule-workforce-benefits-cases-scope",
+                                "resource.organizationId",
+                                "subject.organizationUnitIds",
+                                List.of(),
+                                List.of()
+                        )
+                        .addActionPolicy(caseSpec, "homologate", "rule-benefits-homologate", principalPresent)
+                        .addSurfacePolicy(caseSpec, "detail", "rule-benefits-detail", principalPresent, List.of())
+                        .addSurfacePolicy(caseSpec, "review-form", "rule-benefits-review-form", principalPresent, List.of())
+                        .addResourceSpec(profileSpec, Beta7EmployeeProfileEntity.class, Beta7EmployeeProfileEntity.class, Beta7EmployeeProfileEntity.class)
+                        .addAuthenticatedSharedPolicy(profileSpec, "rule-workforce-profiles-shared", List.of(), List.of())
+                        .addSurfacePolicy(profileSpec, "profile-sheet", "rule-profiles-sheet", principalPresent, List.of())
+                        .build();
+
+        MetadataResourceAuthorizationSeam seam = createSeam(bundle, txTemplate, jdbcTemplate);
+        ThreadLocalAuthzCallerContextProvider callerProvider = new ThreadLocalAuthzCallerContextProvider();
+        AuthzGovernedResourceServiceSupport serviceSupport =
+                new AuthzGovernedResourceServiceSupport(seam, new DetachedDtoMaskingProcessor());
+        AuthzResourceOperationAvailabilityProvider availabilityProvider =
+                new AuthzResourceOperationAvailabilityProvider(seam);
+        AuthzResourceGovernanceInterceptor interceptor =
+                new AuthzResourceGovernanceInterceptor(serviceSupport, callerProvider)
+                        .registerSpec(caseSpec)
+                        .registerSpec(profileSpec);
+
+        Beta7BenefitsCaseService rawCaseService = new Beta7BenefitsCaseService(caseRepo);
+        rawCaseService.setResourceGovernanceInterceptors(List.of(interceptor));
+        Beta7EmployeeProfileService rawProfileService = new Beta7EmployeeProfileService(profileRepo);
+        rawProfileService.setResourceGovernanceInterceptors(List.of(interceptor));
+
+        TransactionInterceptor txAdvice = new TransactionInterceptor(txManager, new AnnotationTransactionAttributeSource());
+        ProxyFactory caseProxyFactory = new ProxyFactory(rawCaseService);
+        caseProxyFactory.setProxyTargetClass(true);
+        caseProxyFactory.addAdvice(txAdvice);
+        Beta7BenefitsCaseService proxiedCaseService = (Beta7BenefitsCaseService) caseProxyFactory.getProxy();
+
+        ProxyFactory profileProxyFactory = new ProxyFactory(rawProfileService);
+        profileProxyFactory.setProxyTargetClass(true);
+        profileProxyFactory.addAdvice(txAdvice);
+        Beta7EmployeeProfileService proxiedProfileService = (Beta7EmployeeProfileService) profileProxyFactory.getProxy();
+
+        // Mirrors PraxisAuthzHostBridgeAutoConfiguration registering the Spring AOP proxy
+        interceptor.registerAvailabilityBindingIfSupported(proxiedCaseService, availabilityProvider);
+        interceptor.registerAvailabilityBindingIfSupported(proxiedProfileService, availabilityProvider);
+
+        SurfaceDefinition detailSurfaceDef = new SurfaceDefinition(
+                "detail", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", SurfaceKind.READ_PROJECTION, SurfaceScope.ITEM, "Detail 360", "Detail summary",
+                "detail", "visibility", "response", SurfaceResponseCardinality.OBJECT,
+                null, null, 1, List.of(), List.of(), List.of(), null
+        );
+        SurfaceDefinition reviewFormSurfaceDef = new SurfaceDefinition(
+                "review-form", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", SurfaceKind.PARTIAL_FORM, SurfaceScope.ITEM, "Review Form", "Partial review form",
+                "reviewForm", "visibility", "response", SurfaceResponseCardinality.OBJECT,
+                null, null, 2, List.of(), List.of(), List.of(), null
+        );
+        ActionDefinition homologateActionDef = new ActionDefinition(
+                "homologate", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", ActionScope.ITEM, "Homologate", "Approve case",
+                null, null, null, 10, "APPROVED", List.of(), List.of("DRAFT"), List.of(),
+                ActionExecutionContract.defaults(ActionScope.ITEM)
+        );
+        SurfaceDefinition profileSheetSurfaceDef = new SurfaceDefinition(
+                "profile-sheet", "workforce.employee-profiles", "/api/workforce/employee-profiles",
+                "workforce", SurfaceKind.READ_PROJECTION, SurfaceScope.ITEM, "Profile Sheet", "Shared sheet",
+                "profileSheet", "visibility", "response", SurfaceResponseCardinality.OBJECT,
+                null, null, 1, List.of(), List.of(), List.of(), null
+        );
+
+        try {
+            // 1. Single-org caller with pre-resolved host snapshot + open ResourceStateSnapshotScope
+            AuthzCallerContext org10Caller = new AuthzCallerContext(
+                    "10",
+                    Map.of(
+                            "subject.principalId", "hr-mgr",
+                            "subject.organizationUnitIds", List.of(10L),
+                            AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS, List.of(10L)
+                    ),
+                    Map.of(
+                            "subject.principalId", FactResolutionStatus.PRESENT,
+                            "subject.organizationUnitIds", FactResolutionStatus.PRESENT,
+                            AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS, FactResolutionStatus.PRESENT
+                    ),
+                    Set.of(), Map.of(), null, null
+            );
+
+            callerProvider.runWithContext(org10Caller, () -> {
+                try (var scope = ResourceStateSnapshotScope.open()) {
+                    // findById runs verifyEntityAccess(this, ...) with unproxied target AND seeds un-enriched custom snapshot
+                    Beta7BenefitsCaseEntity loaded = proxiedCaseService.findById(101L).body();
+                    assertNotNull(loaded);
+
+                    ResourceStateSnapshot hostSeededSnapshot = proxiedCaseService.findResourceStateSnapshot(101L).orElseThrow();
+                    assertNull(hostSeededSnapshot.metadata().get(AuthzResourceGovernanceSpec.SNAPSHOT_ENRICHED_META_KEY));
+
+                    assertTrue(availabilityProvider.evaluate(
+                            detailSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "hr-mgr", Set.of(), hostSeededSnapshot
+                            )
+                    ).allowed());
+                    assertTrue(availabilityProvider.evaluate(
+                            reviewFormSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "hr-mgr", Set.of(), hostSeededSnapshot
+                            )
+                    ).allowed());
+                    assertTrue(availabilityProvider.evaluate(
+                            homologateActionDef,
+                            new ActionAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "hr-mgr", Set.of(), hostSeededSnapshot
+                            )
+                    ).allowed());
+                    assertTrue(availabilityProvider.evaluate(
+                            ResourceOperationAvailabilityContext.item(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", "edit", 101L, hostSeededSnapshot
+                            )
+                    ).allowed());
+
+                    // Out-of-scope #102 remains denied even if caller supplies a host snapshot stub
+                    ResourceStateSnapshot foreignStub = ResourceStateSnapshot.of("DRAFT", Map.of("resource.legalBasis", "Statute"));
+                    assertFalse(availabilityProvider.evaluate(
+                            detailSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 102L,
+                                    "10", java.util.Locale.ROOT, () -> "hr-mgr", Set.of(), foreignStub
+                            )
+                    ).allowed());
+
+                    // 2. AUTHENTICATED_SHARED non-"id" @Id entity (employeeNumber = 900212L) inside open ResourceStateSnapshotScope
+                    Beta7EmployeeProfileEntity profileLoaded = proxiedProfileService.findById(900212L).body();
+                    assertNotNull(profileLoaded);
+                    AvailabilityDecision sharedSurfaceDecision = availabilityProvider.evaluate(
+                            profileSheetSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.employee-profiles", "/api/workforce/employee-profiles", 900212L,
+                                    "10", java.util.Locale.ROOT, () -> "hr-mgr", Set.of(), null
+                            )
+                    );
+                    assertTrue(sharedSurfaceDecision.allowed(),
+                            "AUTHENTICATED_SHARED item with non-'id' @Id must allow read surface without failing resource-state-unavailable");
+                }
+            });
+
+            // 3. Consolidation read-only scope: allows view & READ_PROJECTION detail, denies mutating surfaces/actions
+            AuthzCallerContext consolidationCaller = new AuthzCallerContext(
+                    "10",
+                    Map.of(
+                            "subject.principalId", "auditor-1",
+                            "subject.organizationUnitIds", List.of(10L, 99L),
+                            AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS, List.of(10L, 99L),
+                            AuthzCallerContext.FACT_READ_ONLY_CONSOLIDATION_SCOPE, true
+                    ),
+                    Map.of(
+                            "subject.principalId", FactResolutionStatus.PRESENT,
+                            "subject.organizationUnitIds", FactResolutionStatus.PRESENT,
+                            AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS, FactResolutionStatus.PRESENT,
+                            AuthzCallerContext.FACT_READ_ONLY_CONSOLIDATION_SCOPE, FactResolutionStatus.PRESENT
+                    ),
+                    Set.of(), Map.of(), null, null
+            );
+
+            callerProvider.runWithContext(consolidationCaller, () -> {
+                try (var scope = ResourceStateSnapshotScope.open()) {
+                    assertTrue(availabilityProvider.evaluate(
+                            detailSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                            )
+                    ).allowed());
+                    assertTrue(availabilityProvider.evaluate(
+                            ResourceOperationAvailabilityContext.item(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", "view", 101L
+                            )
+                    ).allowed());
+
+                    AvailabilityDecision deniedForm = availabilityProvider.evaluate(
+                            reviewFormSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                            )
+                    );
+                    assertFalse(deniedForm.allowed());
+                    assertEquals("consolidation-read-only-scope", deniedForm.reason());
+
+                    AvailabilityDecision deniedAction = availabilityProvider.evaluate(
+                            homologateActionDef,
+                            new ActionAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                            )
+                    );
+                    assertFalse(deniedAction.allowed());
+                    assertEquals("consolidation-read-only-scope", deniedAction.reason());
+
+                    AvailabilityDecision deniedEdit = availabilityProvider.evaluate(
+                            ResourceOperationAvailabilityContext.item(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", "edit", 101L
+                            )
+                    );
+                    assertFalse(deniedEdit.allowed());
+                    assertEquals("consolidation-read-only-scope", deniedEdit.reason());
+                }
+            });
+        } finally {
+            emfBean.destroy();
+        }
     }
 }
