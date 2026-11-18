@@ -2,10 +2,14 @@ package org.praxisplatform.authz.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -13,6 +17,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.praxisplatform.authz.autoconfigure.PraxisAuthzAgentBridgeAutoConfiguration;
+import org.praxisplatform.config.autoconfig.OperationalAgentAutoConfiguration;
+import org.praxisplatform.config.ai.agent.spi.AgentAuthorizationBridge;
 import org.praxisplatform.authz.catalog.AdmittedInvocationChannel;
 import org.praxisplatform.authz.catalog.FieldLineageCatalogEntry;
 import org.praxisplatform.authz.catalog.MethodBindingAdmissionRecord;
@@ -50,12 +57,45 @@ import org.praxisplatform.config.ai.agent.spi.AgentExecutionContext;
 import org.praxisplatform.config.ai.agent.spi.AgentThreadContextPropagator;
 import org.praxisplatform.config.ai.agent.spi.CompositeAgentThreadContextPropagator;
 import org.praxisplatform.config.ai.agent.spi.DualProjectedPayload;
+import org.praxisplatform.uischema.action.ActionRequirement;
+import org.praxisplatform.uischema.action.ActionRiskLevel;
+import org.praxisplatform.uischema.action.ActionScope;
 import org.praxisplatform.uischema.annotation.AiUsagePolicy;
 import org.praxisplatform.uischema.annotation.AiVisibilityMode;
+import org.praxisplatform.uischema.annotation.ApiResource;
 import org.praxisplatform.uischema.annotation.DomainClassification;
 import org.praxisplatform.uischema.annotation.DomainGovernance;
+import org.praxisplatform.uischema.annotation.WorkflowAction;
 import org.praxisplatform.uischema.capability.ResourceStateSnapshot;
+import org.praxisplatform.uischema.concurrency.ResourceRepresentationResult;
+import org.praxisplatform.uischema.controller.base.AbstractResourceQueryController;
+import org.praxisplatform.uischema.dto.CursorPage;
+import org.praxisplatform.uischema.dto.OptionDTO;
 import org.praxisplatform.uischema.extension.annotation.UISchema;
+import org.praxisplatform.uischema.filter.dto.GenericFilterDTO;
+import org.praxisplatform.uischema.options.OptionSourceDescriptor;
+import org.praxisplatform.uischema.options.OptionSourceFilterRequest;
+import org.praxisplatform.uischema.options.OptionSourceRegistry;
+import org.praxisplatform.uischema.service.base.BaseResourceQueryService;
+import org.praxisplatform.uischema.stats.StatsFieldRegistry;
+import org.praxisplatform.uischema.stats.StatsSupportMode;
+import org.praxisplatform.uischema.stats.dto.ComparisonStatsRequest;
+import org.praxisplatform.uischema.stats.dto.ComparisonStatsResponse;
+import org.praxisplatform.uischema.stats.dto.DistributionStatsRequest;
+import org.praxisplatform.uischema.stats.dto.DistributionStatsResponse;
+import org.praxisplatform.uischema.stats.dto.GroupByStatsRequest;
+import org.praxisplatform.uischema.stats.dto.GroupByStatsResponse;
+import org.praxisplatform.uischema.stats.dto.TimeSeriesStatsRequest;
+import org.praxisplatform.uischema.stats.dto.TimeSeriesStatsResponse;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 
 class AuthzAgentAuthorizationBridgeTest {
 
@@ -306,5 +346,102 @@ class AuthzAgentAuthorizationBridgeTest {
                 execContext, resourcePath, GovernedEmployeeRecordDto.class, rawRecord));
 
         callerProvider.clearContext();
+    }
+
+    public static class RestrictedActionInputDto {
+        @UISchema(label = "Observacao", editableForAuthorities = {"ROLE_WRITE", "ROLE_ADMIN"})
+        public String note;
+
+        @UISchema(label = "Codigo de alcada", editableForAuthorities = {"ROLE_ADMIN"})
+        public String approvalCode;
+    }
+
+    public static class RestrictedItemDto {
+        public Long id;
+        @UISchema(label = "Nome")
+        public String name;
+        public Long getId() { return id; }
+        public String getName() { return name; }
+    }
+
+    public static class EmptyFilterDto implements GenericFilterDTO {
+    }
+
+    @ApiResource(value = "/api/workforce/restricted-approvals", resourceKey = "wf.restricted-approvals", title = "Aprovacoes")
+    static class RestrictedWorkflowController extends AbstractResourceQueryController<RestrictedItemDto, Long, EmptyFilterDto> {
+        private final BaseResourceQueryService<RestrictedItemDto, Long, EmptyFilterDto> service = new BaseResourceQueryService<>() {
+            @Override public String getIdFieldName() { return "id"; }
+            @Override public Sort getDefaultSort() { return Sort.by("id"); }
+            @Override public Optional<String> getDatasetVersion() { return Optional.empty(); }
+            @Override public StatsSupportMode getGroupByStatsSupportMode() { return StatsSupportMode.DISABLED; }
+            @Override public StatsSupportMode getTimeSeriesStatsSupportMode() { return StatsSupportMode.DISABLED; }
+            @Override public StatsSupportMode getDistributionStatsSupportMode() { return StatsSupportMode.DISABLED; }
+            @Override public StatsFieldRegistry getStatsFieldRegistry() { return null; }
+            @Override public OptionSourceRegistry getOptionSourceRegistry() { return null; }
+            @Override public boolean hasOptionSource(String key) { return false; }
+            @Override public OptionSourceDescriptor resolveOptionSource(String key) { return null; }
+            @Override public List<RestrictedItemDto> findAll() { return List.of(); }
+            @Override public List<RestrictedItemDto> findAllById(Collection<Long> ids) { return List.of(); }
+            @Override public ResourceRepresentationResult<RestrictedItemDto> findById(Long id) { return null; }
+            @Override public Page<RestrictedItemDto> filter(EmptyFilterDto f, Pageable p, Collection<Long> ids) { return Page.empty(); }
+            @Override public CursorPage<RestrictedItemDto> filterByCursor(EmptyFilterDto f, Sort s, String a, String c, int l) { return null; }
+            @Override public java.util.OptionalLong locate(EmptyFilterDto f, Sort s, Long id) { return java.util.OptionalLong.empty(); }
+            @Override public Page<OptionDTO<Long>> filterOptions(EmptyFilterDto f, Pageable p) { return Page.empty(); }
+            @Override public List<OptionDTO<Long>> byIdsOptions(Collection<Long> ids) { return List.of(); }
+            @Override public Page<OptionDTO<Object>> filterOptionSourceOptions(String k, OptionSourceFilterRequest<EmptyFilterDto> r, Pageable p) { return Page.empty(); }
+            @Override public List<OptionDTO<Object>> byIdsOptionSourceOptions(String k, Collection<Object> ids) { return List.of(); }
+            @Override public GroupByStatsResponse groupByStats(GroupByStatsRequest<EmptyFilterDto> r) { return null; }
+            @Override public TimeSeriesStatsResponse timeSeriesStats(TimeSeriesStatsRequest<EmptyFilterDto> r) { return null; }
+            @Override public DistributionStatsResponse distributionStats(DistributionStatsRequest<EmptyFilterDto> r) { return null; }
+            @Override public ComparisonStatsResponse comparisonStats(ComparisonStatsRequest<EmptyFilterDto> r) { return null; }
+        };
+
+        @PostMapping("/{id}/actions/approve-restricted")
+        @WorkflowAction(
+                id = "approve-restricted",
+                title = "Aprovar com alcada",
+                scope = ActionScope.ITEM,
+                requiredAuthorities = {"ROLE_ADMIN"},
+                resourceVersion = ActionRequirement.OPTIONAL,
+                riskLevel = ActionRiskLevel.HIGH)
+        public ResponseEntity<RestrictedItemDto> approveRestricted(
+                @PathVariable Long id,
+                @RequestBody RestrictedActionInputDto input) {
+            return ResponseEntity.ok(new RestrictedItemDto());
+        }
+
+        @Override protected BaseResourceQueryService<RestrictedItemDto, Long, EmptyFilterDto> getService() { return service; }
+        @Override protected Long getResponseId(RestrictedItemDto dto) { return dto.id; }
+    }
+
+    @Test
+    void autoConfigurationOrderingWiresControllerIndexedMetadataFallbackAndEnforcesFields() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        OperationalAgentAutoConfiguration.class,
+                        PraxisAuthzAgentBridgeAutoConfiguration.class))
+                .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
+                .withBean(RestrictedWorkflowController.class, RestrictedWorkflowController::new)
+                .run(context -> {
+                    assertNull(context.getStartupFailure());
+                    AgentAuthorizationBridge primary = context.getBean(AgentAuthorizationBridge.class);
+                    assertInstanceOf(AuthzAgentAuthorizationBridge.class, primary);
+
+                    AgentExecutionContext readerCtx = new AgentExecutionContext(
+                            UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                            "tenant-a", "reader", "prod", "reader", Set.of("ROLE_READER"),
+                            null, null, Map.of(), Map.of());
+                    AgentExecutionContext adminCtx = new AgentExecutionContext(
+                            UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                            "tenant-a", "admin", "prod", "admin", Set.of("ROLE_ADMIN"),
+                            null, null, Map.of(), Map.of());
+
+                    String resourcePath = "/api/workforce/restricted-approvals";
+                    assertFalse(primary.canInvokeAction(readerCtx, resourcePath, "approve-restricted", 1L));
+                    assertFalse(primary.canModifyFields(readerCtx, resourcePath, RestrictedActionInputDto.class, Set.of("approvalCode")));
+
+                    assertTrue(primary.canInvokeAction(adminCtx, resourcePath, "approve-restricted", 1L));
+                    assertTrue(primary.canModifyFields(adminCtx, resourcePath, RestrictedActionInputDto.class, Set.of("approvalCode")));
+                });
     }
 }

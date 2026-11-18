@@ -26,7 +26,7 @@ import org.springframework.context.annotation.Primary;
  */
 @AutoConfiguration(
         after = PraxisAuthzHostBridgeAutoConfiguration.class,
-        beforeName = "org.praxisplatform.config.autoconfig.OperationalAgentAutoConfiguration")
+        afterName = "org.praxisplatform.config.autoconfig.OperationalAgentAutoConfiguration")
 @ConditionalOnClass({AgentAuthorizationBridge.class, DefaultMetadataGovernanceAgentAuthorizationBridge.class})
 @ConditionalOnProperty(prefix = "praxis.authz", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class PraxisAuthzAgentBridgeAutoConfiguration {

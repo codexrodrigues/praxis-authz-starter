@@ -110,6 +110,15 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
     }
 
     @Override
+    public boolean canModifyFields(
+            AgentExecutionContext context,
+            String resourcePath,
+            Class<?> dtoType,
+            Set<String> fieldNames) {
+        return metadataGovernance.canModifyFields(context, resourcePath, dtoType, fieldNames);
+    }
+
+    @Override
     public DualProjectedPayload projectRecord(
             AgentExecutionContext context,
             String resourcePath,
