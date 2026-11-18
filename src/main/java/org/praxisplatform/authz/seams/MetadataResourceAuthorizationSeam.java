@@ -301,14 +301,54 @@ public final class MetadataResourceAuthorizationSeam {
             Map<String, Object> hardScopeParameters,
             Predicate<Map<String, ResolvedFactValue>> targetParityOracle
     ) {
-        if (incomingHeaderNames != null && !incomingHeaderNames.isEmpty()) {
-            Map<String, String> headerProbe = new LinkedHashMap<>();
-            for (String h : incomingHeaderNames) {
-                headerProbe.put(h, "__untrusted_client_header_probe__");
-            }
+        return authorizeAndCompileJpaQueryScope(
+                decisionPoint,
+                factContractDigest,
+                incomingHeaderNames,
+                Map.of(),
+                null,
+                trustedSubjectFacts,
+                trustedFactStatuses,
+                requestedQueryFieldUses,
+                staticFieldUseDirectives,
+                jpaDataScopeAdapter,
+                hardScopeJpql,
+                hardScopeParameters,
+                targetParityOracle
+        );
+    }
+
+    /**
+     * Evaluates collection-level {@code SEARCH} admission and compiles a JPA {@code DataScopePlan}
+     * using validated incoming header values and optional authoritative tenant identity for
+     * anti-spoofing verification.
+     */
+    public AuthorizedQueryScopeContext authorizeAndCompileJpaQueryScope(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            Set<String> incomingHeaderNames,
+            Map<String, String> incomingHeaders,
+            String authoritativeTenantId,
+            Map<String, Object> trustedSubjectFacts,
+            Map<String, FactResolutionStatus> trustedFactStatuses,
+            Map<FieldUseCategory, Set<String>> requestedQueryFieldUses,
+            List<FieldUseEffectDirective> staticFieldUseDirectives,
+            JpaDataScopeAdapter jpaDataScopeAdapter,
+            String hardScopeJpql,
+            Map<String, Object> hardScopeParameters,
+            Predicate<Map<String, ResolvedFactValue>> targetParityOracle
+    ) {
+        Objects.requireNonNull(decisionPoint, "decisionPoint is required");
+        Objects.requireNonNull(factContractDigest, "factContractDigest is required");
+        Objects.requireNonNull(jpaDataScopeAdapter, "jpaDataScopeAdapter is required");
+        Objects.requireNonNull(hardScopeJpql, "hardScopeJpql is required");
+
+        Map<String, String> headerProbe = org.praxisplatform.authz.host.metadata.AuthzCallerContext
+                .buildHeaderProbeMap(incomingHeaderNames, incomingHeaders);
+        if (!headerProbe.isEmpty()) {
             UntrustedRequestHeaderGuard.assertNoAuthoritySpoofingHeaders(
                     headerProbe,
-                    toAuthoritativeSubjectFactMap(trustedSubjectFacts, trustedFactStatuses)
+                    toAuthoritativeSubjectFactMap(trustedSubjectFacts, trustedFactStatuses, authoritativeTenantId)
             );
         }
         List<FieldUseEffectDirective> initialDirectives = staticFieldUseDirectives == null ? List.of() : staticFieldUseDirectives;
@@ -501,15 +541,13 @@ public final class MetadataResourceAuthorizationSeam {
                 TransactionCardinality.STATEMENT_ATOMIC,
                 List.of()
         );
-        ProviderInputProjection targetInput = new ProviderInputProjection(
-                ProviderInputProjection.SCHEMA_VERSION_V1,
+        ProviderInputProjection targetInput = newTargetInputProjection(
                 pointKey,
-                "TARGET",
                 factContractDigest,
-                new TemporalContext(Instant.now(), ZoneOffset.UTC),
                 trustedTargetFacts,
                 statuses,
-                Set.of()
+                Instant.now(),
+                readIntent.operationVerb()
         );
         ProviderEvaluationEnvelope envelope = providerPort.evaluateTarget(targetInput, readIntent);
         publishTelemetryIfConfigured(trustedTargetFacts, decisionPoint, envelope);
@@ -595,15 +633,13 @@ public final class MetadataResourceAuthorizationSeam {
                 ignoredTechnicalWirePaths
         );
 
-        ProviderInputProjection targetInput = new ProviderInputProjection(
-                ProviderInputProjection.SCHEMA_VERSION_V1,
+        ProviderInputProjection targetInput = newTargetInputProjection(
                 decisionPoint.identity().pointKey(),
-                "TARGET",
                 factContractDigest,
-                new TemporalContext(Instant.now(), ZoneOffset.UTC),
                 trustedTargetFacts,
                 trustedFactStatuses,
-                Set.of()
+                Instant.now(),
+                writeIntent.operationVerb()
         );
 
         ProviderEvaluationEnvelope envelope = providerPort.evaluateTarget(targetInput, writeIntent);
@@ -817,15 +853,13 @@ public final class MetadataResourceAuthorizationSeam {
         if (itemFactStatuses != null) {
             mergedStatuses.putAll(itemFactStatuses);
         }
-        ProviderInputProjection targetInput = new ProviderInputProjection(
-                ProviderInputProjection.SCHEMA_VERSION_V1,
+        ProviderInputProjection targetInput = newTargetInputProjection(
                 decisionPoint.identity().pointKey(),
-                "TARGET",
                 factContractDigest,
-                new TemporalContext(now, ZoneOffset.UTC),
                 mergedFacts,
                 mergedStatuses,
-                Set.of()
+                now,
+                itemWriteIntent.operationVerb()
         );
         ProviderEvaluationEnvelope envelope = providerPort.evaluateTarget(targetInput, itemWriteIntent);
         publishTelemetryIfConfigured(mergedFacts, decisionPoint, envelope);
@@ -892,14 +926,32 @@ public final class MetadataResourceAuthorizationSeam {
         );
     }
 
-    private static Map<String, ResolvedFactValue> toAuthoritativeSubjectFactMap(
+    public static Map<String, ResolvedFactValue> toAuthoritativeSubjectFactMap(
             Map<String, Object> trustedFacts,
             Map<String, FactResolutionStatus> trustedFactStatuses
     ) {
-        if (trustedFacts == null || trustedFacts.isEmpty()) {
-            return Map.of();
-        }
+        return toAuthoritativeSubjectFactMap(trustedFacts, trustedFactStatuses, null);
+    }
+
+    /**
+     * Converts trusted runtime subject facts (and an optional authoritative tenant id) into
+     * canonical {@link ResolvedFactValue} entries for {@link UntrustedRequestHeaderGuard}.
+     */
+    public static Map<String, ResolvedFactValue> toAuthoritativeSubjectFactMap(
+            Map<String, Object> trustedFacts,
+            Map<String, FactResolutionStatus> trustedFactStatuses,
+            String authoritativeTenantId
+    ) {
         Map<String, ResolvedFactValue> resolved = new LinkedHashMap<>();
+        if (authoritativeTenantId != null && !authoritativeTenantId.isBlank()) {
+            resolved.put(
+                    "subject.tenantId",
+                    ResolvedFactValue.present("subject.tenantId", authoritativeTenantId.trim())
+            );
+        }
+        if (trustedFacts == null || trustedFacts.isEmpty()) {
+            return resolved.isEmpty() ? Map.of() : Map.copyOf(resolved);
+        }
         for (Map.Entry<String, Object> entry : trustedFacts.entrySet()) {
             FactResolutionStatus status = trustedFactStatuses != null
                     ? trustedFactStatuses.getOrDefault(entry.getKey(), FactResolutionStatus.PRESENT)
@@ -909,6 +961,33 @@ public final class MetadataResourceAuthorizationSeam {
             }
         }
         return resolved;
+    }
+
+    private static ProviderInputProjection newTargetInputProjection(
+            String pointKey,
+            String factContractDigest,
+            Map<String, Object> facts,
+            Map<String, FactResolutionStatus> statuses,
+            Instant timestamp,
+            String actionVerb
+    ) {
+        Map<String, Object> enrichedFacts = facts == null ? new LinkedHashMap<>() : new LinkedHashMap<>(facts);
+        Map<String, FactResolutionStatus> enrichedStatuses =
+                statuses == null ? new LinkedHashMap<>() : new LinkedHashMap<>(statuses);
+        if (actionVerb != null && !actionVerb.isBlank()) {
+            enrichedFacts.putIfAbsent("action.verb", actionVerb);
+            enrichedStatuses.putIfAbsent("action.verb", FactResolutionStatus.PRESENT);
+        }
+        return new ProviderInputProjection(
+                ProviderInputProjection.SCHEMA_VERSION_V1,
+                pointKey,
+                "TARGET",
+                factContractDigest,
+                new TemporalContext(timestamp != null ? timestamp : Instant.now(), ZoneOffset.UTC),
+                Map.copyOf(enrichedFacts),
+                Map.copyOf(enrichedStatuses),
+                Set.of()
+        );
     }
 
     /**
@@ -1255,15 +1334,13 @@ public final class MetadataResourceAuthorizationSeam {
             }
         }
 
-        ProviderInputProjection targetInput = new ProviderInputProjection(
-                ProviderInputProjection.SCHEMA_VERSION_V1,
+        ProviderInputProjection targetInput = newTargetInputProjection(
                 pointKey,
-                "TARGET",
                 factContractDigest,
-                new TemporalContext(Instant.now(), ZoneOffset.UTC),
                 mergedFacts,
                 mergedStatuses,
-                Set.of()
+                Instant.now(),
+                syntheticWriteIntent.operationVerb()
         );
         ProviderEvaluationEnvelope envelope = providerPort.evaluateTarget(targetInput, syntheticWriteIntent);
         List<String> reasonCodes = extractPolicyReasonCodes(envelope);

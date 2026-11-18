@@ -230,15 +230,26 @@ public class PraxisAuthzHostBridgeAutoConfiguration {
                 AuthzGovernedResourceServiceSupport serviceSupport,
                 org.praxisplatform.authz.host.metadata.AuthzCallerContextProvider callerContextProvider,
                 ObjectProvider<org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry> decisionPointRegistry,
+                ObjectProvider<AuthzHostPolicyBootstrapBundle> bootstrapBundleProvider,
                 ObjectProvider<org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec<?>> registeredSpecs,
                 org.springframework.context.ApplicationContext applicationContext,
                 PraxisAuthzProperties properties
         ) {
+            java.util.List<org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec<?>> effectiveSpecs =
+                    new java.util.ArrayList<>();
+            if (bootstrapBundleProvider != null) {
+                bootstrapBundleProvider.orderedStream()
+                        .flatMap(bundle -> bundle.resourceSpecs().stream())
+                        .forEach(effectiveSpecs::add);
+            }
+            if (registeredSpecs != null) {
+                registeredSpecs.orderedStream().forEach(effectiveSpecs::add);
+            }
             return new org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceInterceptor(
                     serviceSupport,
                     callerContextProvider,
                     decisionPointRegistry.getIfAvailable(),
-                    registeredSpecs.stream().toList(),
+                    effectiveSpecs,
                     applicationContext,
                     properties.getInterceptor().isFailClosedOnUnconfiguredServices()
             );

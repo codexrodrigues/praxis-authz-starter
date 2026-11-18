@@ -1463,6 +1463,8 @@ public final class AuthzResourceGovernanceSpec<E> {
     public static final class Builder<E> {
         private final String resourceKey;
         private String serviceKey;
+        private boolean includeActionVerbFact = false;
+        private boolean includeSubjectRolesFact = false;
         private String operationKey = "filter";
         private String httpMethod = "POST";
         private String httpPath;
@@ -1701,6 +1703,61 @@ public final class AuthzResourceGovernanceSpec<E> {
         public Builder<E> factDescriptor(FactDescriptor descriptor) {
             Objects.requireNonNull(descriptor, "descriptor is required");
             this.declarativeFacts.put(descriptor.factPath(), descriptor);
+            return this;
+        }
+
+        /**
+         * Enables opt-in emission and {@link FactContract} registration of the canonical
+         * {@code action.verb} fact ({@code GET}, {@code POST}, {@code PATCH}, {@code PUT},
+         * {@code DELETE}) during {@code TARGET} policy evaluations.
+         */
+        public Builder<E> withActionVerbFact() {
+            this.includeActionVerbFact = true;
+            return this;
+        }
+
+        /**
+         * Ensures {@code subject.roles} is registered in the auto-derived {@link FactContract}
+         * even when primary/scope rules inspect caller roles outside declarative action annotations.
+         */
+        public Builder<E> withSubjectRolesFact() {
+            this.includeSubjectRolesFact = true;
+            return this;
+        }
+
+        /**
+         * Registers a subject fact descriptor in the auto-derived {@link FactContract}.
+         */
+        public Builder<E> subjectFact(
+                String factPath,
+                FactValueType valueType,
+                FactCardinality cardinality,
+                FactPresenceModel presenceModel
+        ) {
+            Objects.requireNonNull(factPath, "factPath is required");
+            Objects.requireNonNull(valueType, "valueType is required");
+            Objects.requireNonNull(cardinality, "cardinality is required");
+            Objects.requireNonNull(presenceModel, "presenceModel is required");
+            this.declarativeFacts.put(
+                    factPath,
+                    new FactDescriptor(
+                            factPath,
+                            FactSlotNamespace.SUBJECT,
+                            valueType,
+                            cardinality,
+                            presenceModel,
+                            null,
+                            null,
+                            FactResolutionStage.ENRICH,
+                            Set.of(ContextEvaluationPhase.ADMISSION, ContextEvaluationPhase.TARGET),
+                            false,
+                            "INTERNAL",
+                            "OPERATIONAL",
+                            Set.of(),
+                            legalBasis,
+                            null
+                    )
+            );
             return this;
         }
 
@@ -3440,8 +3497,30 @@ public final class AuthzResourceGovernanceSpec<E> {
                         )
                 );
                 facts.putAll(this.declarativeFacts);
-                boolean requiresSubjectRoles = this.actionRuleSpecs.values().stream()
-                        .anyMatch(r -> !r.requiredRoles().isEmpty())
+                if (this.includeActionVerbFact) {
+                    facts.putIfAbsent(
+                            "action.verb",
+                            new FactDescriptor(
+                                    "action.verb",
+                                    FactSlotNamespace.ACTION,
+                                    FactValueType.STRING,
+                                    FactCardinality.SCALAR,
+                                    FactPresenceModel.MAY_BE_ABSENT,
+                                    null,
+                                    null,
+                                    FactResolutionStage.EXTRACT,
+                                    Set.of(ContextEvaluationPhase.TARGET),
+                                    false,
+                                    "INTERNAL",
+                                    "OPERATIONAL",
+                                    Set.of(),
+                                    legalBasis,
+                                    null
+                            )
+                    );
+                }
+                boolean requiresSubjectRoles = this.includeSubjectRolesFact
+                        || this.actionRuleSpecs.values().stream().anyMatch(r -> !r.requiredRoles().isEmpty())
                         || this.surfaceRuleSpecs.values().stream().anyMatch(r -> !r.requiredRoles().isEmpty());
                 if (requiresSubjectRoles) {
                     facts.putIfAbsent(

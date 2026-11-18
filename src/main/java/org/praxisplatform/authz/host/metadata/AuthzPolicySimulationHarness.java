@@ -3702,18 +3702,26 @@ public final class AuthzPolicySimulationHarness<E, ResponseDTO> {
     public HeaderSpoofingSimulationOutcome simulateHeaderSpoofingGuard(AuthzCallerContext caller) {
         Objects.requireNonNull(caller, "caller is required");
         Set<String> headers = caller.incomingHeaderNames();
-        if (headers == null || headers.isEmpty()) {
+        if ((headers == null || headers.isEmpty()) && caller.incomingHeaders().isEmpty()) {
             return new HeaderSpoofingSimulationOutcome(true, List.of(), null);
         }
+        Map<String, String> effectiveProbe = caller.effectiveHeaderProbeMap();
+        Map<String, org.praxisplatform.authz.contracts.context.ResolvedFactValue> authoritativeFacts =
+                MetadataResourceAuthorizationSeam.toAuthoritativeSubjectFactMap(
+                        caller.subjectAndEnvironmentFacts(),
+                        caller.factStatuses(),
+                        caller.tenantId()
+                );
         List<String> rejected = new ArrayList<>();
-        for (String h : headers) {
+        for (Map.Entry<String, String> entry : effectiveProbe.entrySet()) {
+            String h = entry.getKey();
             if (h == null || h.isBlank()) {
                 continue;
             }
             try {
                 UntrustedRequestHeaderGuard.assertNoAuthoritySpoofingHeaders(
-                        Map.of(h, "__untrusted_client_header_probe__"),
-                        Map.of()
+                        Map.of(h, entry.getValue()),
+                        authoritativeFacts
                 );
             } catch (RuntimeException ex) {
                 rejected.add(h);

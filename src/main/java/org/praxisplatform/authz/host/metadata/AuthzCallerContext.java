@@ -30,7 +30,8 @@ public record AuthzCallerContext(
         Set<String> incomingHeaderNames,
         Map<FieldUseCategory, Set<String>> requestedQueryFieldUses,
         Boolean callerMatchesCedente,
-        Boolean callerMatchesCessionario
+        Boolean callerMatchesCessionario,
+        Map<String, String> incomingHeaders
 ) {
 
     /** Canonical subject fact key carrying multi-organization hard-scope identifiers. */
@@ -62,6 +63,41 @@ public record AuthzCallerContext(
         }
         incomingHeaderNames = incomingHeaderNames == null ? Set.of() : Set.copyOf(incomingHeaderNames);
         requestedQueryFieldUses = requestedQueryFieldUses == null ? Map.of() : Map.copyOf(requestedQueryFieldUses);
+        if (incomingHeaders == null || incomingHeaders.isEmpty()) {
+            incomingHeaders = Map.of();
+        } else {
+            Map<String, String> sanitizedHeaders = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : incomingHeaders.entrySet()) {
+                if (entry.getKey() != null && entry.getValue() != null) {
+                    sanitizedHeaders.put(entry.getKey(), entry.getValue());
+                }
+            }
+            incomingHeaders = java.util.Collections.unmodifiableMap(sanitizedHeaders);
+        }
+    }
+
+    /**
+     * Backward-compatible 7-argument constructor without explicit incoming header values.
+     */
+    public AuthzCallerContext(
+            String tenantId,
+            Map<String, Object> subjectAndEnvironmentFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            Set<String> incomingHeaderNames,
+            Map<FieldUseCategory, Set<String>> requestedQueryFieldUses,
+            Boolean callerMatchesCedente,
+            Boolean callerMatchesCessionario
+    ) {
+        this(
+                tenantId,
+                subjectAndEnvironmentFacts,
+                factStatuses,
+                incomingHeaderNames,
+                requestedQueryFieldUses,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                Map.of()
+        );
     }
 
     /**
@@ -178,7 +214,8 @@ public record AuthzCallerContext(
                 incomingHeaderNames,
                 requestedQueryFieldUses,
                 matchesOrigin,
-                matchesDestination
+                matchesDestination,
+                incomingHeaders
         );
     }
 
@@ -202,7 +239,8 @@ public record AuthzCallerContext(
                 incomingHeaderNames,
                 requestedQueryFieldUses,
                 callerMatchesCedente,
-                callerMatchesCessionario
+                callerMatchesCessionario,
+                incomingHeaders
         );
     }
 
@@ -220,7 +258,74 @@ public record AuthzCallerContext(
                 headerNames,
                 requestedQueryFieldUses,
                 callerMatchesCedente,
-                callerMatchesCessionario
+                callerMatchesCessionario,
+                incomingHeaders
         );
+    }
+
+    /**
+     * Returns a copy of this context with the validated incoming HTTP headers and header names.
+     *
+     * @param rawHeaders incoming HTTP request headers
+     * @return updated immutable {@link AuthzCallerContext}
+     */
+    public AuthzCallerContext withIncomingHeaders(Map<String, String> rawHeaders) {
+        Map<String, String> cleanHeaders = rawHeaders == null ? Map.of() : rawHeaders;
+        Set<String> effectiveNames = !incomingHeaderNames.isEmpty() || cleanHeaders.isEmpty()
+                ? incomingHeaderNames
+                : cleanHeaders.keySet();
+        return new AuthzCallerContext(
+                tenantId,
+                subjectAndEnvironmentFacts,
+                factStatuses,
+                effectiveNames,
+                requestedQueryFieldUses,
+                callerMatchesCedente,
+                callerMatchesCessionario,
+                cleanHeaders
+        );
+    }
+
+    /**
+     * Builds the header map for {@link org.praxisplatform.authz.enforcement.context.UntrustedRequestHeaderGuard},
+     * using real incoming header values when available and falling back to synthetic probes only for
+     * header names that have no captured raw value.
+     */
+    public Map<String, String> effectiveHeaderProbeMap() {
+        return buildHeaderProbeMap(incomingHeaderNames, incomingHeaders);
+    }
+
+    /**
+     * Builds an anti-spoofing verification header map combining captured header values with synthetic
+     * probes for header names lacking captured values.
+     */
+    public static Map<String, String> buildHeaderProbeMap(
+            Set<String> headerNames,
+            Map<String, String> rawHeaders
+    ) {
+        boolean noNames = headerNames == null || headerNames.isEmpty();
+        boolean noValues = rawHeaders == null || rawHeaders.isEmpty();
+        if (noNames && noValues) {
+            return Map.of();
+        }
+        Map<String, String> probe = new LinkedHashMap<>();
+        java.util.Set<String> coveredLower = new java.util.LinkedHashSet<>();
+        if (!noValues) {
+            for (Map.Entry<String, String> entry : rawHeaders.entrySet()) {
+                if (entry.getKey() != null && !entry.getKey().isBlank() && entry.getValue() != null) {
+                    probe.put(entry.getKey(), entry.getValue());
+                    coveredLower.add(entry.getKey().trim().toLowerCase(java.util.Locale.ROOT));
+                }
+            }
+        }
+        if (!noNames) {
+            for (String h : headerNames) {
+                if (h != null && !h.isBlank()
+                        && !coveredLower.contains(h.trim().toLowerCase(java.util.Locale.ROOT))) {
+                    probe.put(h, "__untrusted_client_header_probe__");
+                }
+            }
+        }
+        return java.util.Collections.unmodifiableMap(probe);
     }
 }

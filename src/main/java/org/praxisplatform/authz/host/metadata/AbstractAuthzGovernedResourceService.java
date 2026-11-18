@@ -491,6 +491,22 @@ public abstract class AbstractAuthzGovernedResourceService<
         return Set.of();
     }
 
+    /** Returns validated incoming HTTP request headers for anti-spoofing verification, or empty map. */
+    protected Map<String, String> resolveRequestHeaders() {
+        if (callerContextProvider != null) {
+            return callerContextProvider.currentCallerContext().incomingHeaders();
+        }
+        return Map.of();
+    }
+
+    /** Returns the authoritative tenant identifier for header anti-spoofing verification, or {@code null}. */
+    protected String resolveCallerTenantId() {
+        if (callerContextProvider != null) {
+            return callerContextProvider.currentCallerContext().tenantId();
+        }
+        return null;
+    }
+
     /** Returns requested query field uses ({@code FILTER}, {@code SORT}, {@code GROUP}) for the current request. */
     protected Map<FieldUseCategory, Set<String>> resolveRequestedQueryFieldUses() {
         Map<FieldUseCategory, Set<String>> callerUses = callerContextProvider != null
@@ -920,6 +936,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                             effectiveActionDp,
                             resolveOperationFactContractDigest(effectiveActionDp),
                             resolveRequestHeaderNames(),
+                            resolveRequestHeaders(),
+                            resolveCallerTenantId(),
                             subjectFacts,
                             resolveFactStatuses(subjectFacts),
                             jpaDataScopeAdapter,
@@ -1604,6 +1622,8 @@ public abstract class AbstractAuthzGovernedResourceService<
                 decisionPoint,
                 factContractDigest,
                 resolveRequestHeaderNames(),
+                resolveRequestHeaders(),
+                resolveCallerTenantId(),
                 subjectFacts,
                 resolveFactStatuses(subjectFacts),
                 resolveRequestedQueryFieldUses(),
@@ -2338,16 +2358,20 @@ public abstract class AbstractAuthzGovernedResourceService<
     }
 
     private Map<String, Object> mergeSubjectAndEntityFacts(E entity) {
+        Map<String, Object> subjectFacts = resolveSubjectAndEnvironmentFacts();
         Set<String> incomingHeaders = resolveRequestHeaderNames();
-        if (incomingHeaders != null && !incomingHeaders.isEmpty()) {
-            Map<String, String> headerProbe = new LinkedHashMap<>();
-            for (String h : incomingHeaders) {
-                headerProbe.put(h, "__untrusted_client_header_probe__");
-            }
-            UntrustedRequestHeaderGuard.assertNoAuthoritySpoofingHeaders(headerProbe, Map.of());
+        Map<String, String> headerProbe = AuthzCallerContext.buildHeaderProbeMap(incomingHeaders, resolveRequestHeaders());
+        if (!headerProbe.isEmpty()) {
+            UntrustedRequestHeaderGuard.assertNoAuthoritySpoofingHeaders(
+                    headerProbe,
+                    org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.toAuthoritativeSubjectFactMap(
+                            subjectFacts,
+                            resolveFactStatuses(subjectFacts),
+                            resolveCallerTenantId()
+                    )
+            );
         }
         Map<String, Object> merged = new LinkedHashMap<>();
-        Map<String, Object> subjectFacts = resolveSubjectAndEnvironmentFacts();
         if (subjectFacts != null) {
             merged.putAll(subjectFacts);
         }

@@ -81,7 +81,8 @@ public final class AuthzHostPolicyBootstrapBuilder {
             List<MethodBindingAdmissionRecord> admissionRecords,
             OpaBundleArtifact bundleArtifact,
             DeterministicLocalOpaTransport localOpaTransport,
-            List<AuthorizationPolicyDefinition> policies
+            List<AuthorizationPolicyDefinition> policies,
+            List<AuthzResourceGovernanceSpec<?>> resourceSpecs
     ) {
         public AuthzHostPolicyBootstrapBundle {
             Objects.requireNonNull(serviceKey, "serviceKey is required");
@@ -90,6 +91,26 @@ public final class AuthzHostPolicyBootstrapBuilder {
             Objects.requireNonNull(bundleArtifact, "bundleArtifact is required");
             Objects.requireNonNull(localOpaTransport, "localOpaTransport is required");
             policies = List.copyOf(Objects.requireNonNull(policies, "policies is required"));
+            resourceSpecs = resourceSpecs == null ? List.of() : List.copyOf(resourceSpecs);
+        }
+
+        public AuthzHostPolicyBootstrapBundle(
+                String serviceKey,
+                HostRuntimePolicyCoordinates coordinates,
+                List<MethodBindingAdmissionRecord> admissionRecords,
+                OpaBundleArtifact bundleArtifact,
+                DeterministicLocalOpaTransport localOpaTransport,
+                List<AuthorizationPolicyDefinition> policies
+        ) {
+            this(
+                    serviceKey,
+                    coordinates,
+                    admissionRecords,
+                    bundleArtifact,
+                    localOpaTransport,
+                    policies,
+                    List.of()
+            );
         }
     }
 
@@ -554,12 +575,49 @@ public final class AuthzHostPolicyBootstrapBuilder {
      * @param redactConstantMasksByAttributeId optional map of {@code attributeId} to constant mask replacement
      * @return this builder
      */
+    private static List<MaskContributionSpec> toRedactConstantMasks(
+            Map<String, String> redactConstantMasksByAttributeId
+    ) {
+        if (redactConstantMasksByAttributeId == null || redactConstantMasksByAttributeId.isEmpty()) {
+            return List.of();
+        }
+        List<MaskContributionSpec> masks = new ArrayList<>(redactConstantMasksByAttributeId.size());
+        for (Map.Entry<String, String> entry : redactConstantMasksByAttributeId.entrySet()) {
+            masks.add(new MaskContributionSpec(
+                    PolicyFieldSelector.exact(Set.of(entry.getKey())),
+                    "REDACT_CONSTANT",
+                    Map.of("replacement", entry.getValue())
+            ));
+        }
+        return List.copyOf(masks);
+    }
+
     public AuthzHostPolicyBootstrapBuilder addSurfacePolicy(
             AuthzResourceGovernanceSpec<?> spec,
             String surfaceKey,
             String ruleId,
             Map<String, Object> targetJsonLogicCondition,
             Map<String, String> redactConstantMasksByAttributeId
+    ) {
+        return addSurfacePolicy(
+                spec,
+                surfaceKey,
+                ruleId,
+                targetJsonLogicCondition,
+                toRedactConstantMasks(redactConstantMasksByAttributeId)
+        );
+    }
+
+    /**
+     * Synthesizes and registers an {@link AuthorizationPolicyDefinition} targeting a declarative
+     * UI surface decision point using explicit {@link MaskContributionSpec} directives.
+     */
+    public AuthzHostPolicyBootstrapBuilder addSurfacePolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String surfaceKey,
+            String ruleId,
+            Map<String, Object> targetJsonLogicCondition,
+            List<MaskContributionSpec> maskDirectives
     ) {
         Objects.requireNonNull(spec, "spec is required");
         Objects.requireNonNull(surfaceKey, "surfaceKey is required");
@@ -574,16 +632,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
             );
         }
 
-        List<MaskContributionSpec> masks = new ArrayList<>();
-        if (redactConstantMasksByAttributeId != null) {
-            for (Map.Entry<String, String> entry : redactConstantMasksByAttributeId.entrySet()) {
-                masks.add(new MaskContributionSpec(
-                        PolicyFieldSelector.exact(Set.of(entry.getKey())),
-                        "REDACT_CONSTANT",
-                        Map.of("replacement", entry.getValue())
-                ));
-            }
-        }
+        List<MaskContributionSpec> masks = maskDirectives == null ? List.of() : List.copyOf(maskDirectives);
 
         Set<EvaluationMode> evalModes = surfaceDp.evaluationModes().isEmpty()
                 ? Set.of(EvaluationMode.TARGET)
@@ -1575,22 +1624,55 @@ public final class AuthzHostPolicyBootstrapBuilder {
             String subjectScopeSetFactPath,
             Map<String, String> redactConstantMasksByAttributeId
     ) {
+        return addOrganizationalScopePolicy(
+                spec,
+                ruleId,
+                resourceScopeFactPath,
+                subjectScopeSetFactPath,
+                toRedactConstantMasks(redactConstantMasksByAttributeId),
+                List.of()
+        );
+    }
+
+    /**
+     * Synthesizes and registers a standard organizational-scope + field-masking + durable-audit
+     * {@link AuthorizationPolicyDefinition} using explicit {@link MaskContributionSpec} directives.
+     */
+    public AuthzHostPolicyBootstrapBuilder addOrganizationalScopePolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String ruleId,
+            String resourceScopeFactPath,
+            String subjectScopeSetFactPath,
+            List<MaskContributionSpec> maskDirectives
+    ) {
+        return addOrganizationalScopePolicy(
+                spec,
+                ruleId,
+                resourceScopeFactPath,
+                subjectScopeSetFactPath,
+                maskDirectives,
+                List.of()
+        );
+    }
+
+    /**
+     * Synthesizes and registers a standard organizational-scope + field-masking + durable-audit
+     * {@link AuthorizationPolicyDefinition} with optional additional {@link AuthorizationPolicyRule}s.
+     */
+    public AuthzHostPolicyBootstrapBuilder addOrganizationalScopePolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String ruleId,
+            String resourceScopeFactPath,
+            String subjectScopeSetFactPath,
+            List<MaskContributionSpec> maskDirectives,
+            List<AuthorizationPolicyRule> additionalRules
+    ) {
         Objects.requireNonNull(spec, "spec is required");
         Objects.requireNonNull(ruleId, "ruleId is required");
         Objects.requireNonNull(resourceScopeFactPath, "resourceScopeFactPath is required");
         Objects.requireNonNull(subjectScopeSetFactPath, "subjectScopeSetFactPath is required");
 
-        List<MaskContributionSpec> masks = new ArrayList<>();
-        if (redactConstantMasksByAttributeId != null) {
-            for (Map.Entry<String, String> entry : redactConstantMasksByAttributeId.entrySet()) {
-                masks.add(new MaskContributionSpec(
-                        PolicyFieldSelector.exact(Set.of(entry.getKey())),
-                        "REDACT_CONSTANT",
-                        Map.of("replacement", entry.getValue())
-                ));
-            }
-        }
-
+        List<MaskContributionSpec> masks = maskDirectives == null ? List.of() : List.copyOf(maskDirectives);
         Map<String, Object> principalCondition = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
         Map<String, Object> scopeInCondition = Map.of(
                 "in",
@@ -1599,12 +1681,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
                         Map.of("var", subjectScopeSetFactPath)
                 )
         );
-        List<ObligationDirective> auditObligations = List.of(new ObligationDirective(
-                "DURABLE_AUDIT_EVIDENCE",
-                "ON_PERMIT",
-                "BEFORE_COMMIT_OUTBOX",
-                Map.of("auditCategory", "GOVERNED_RESOURCE_ACCESS")
-        ));
+        List<ObligationDirective> auditObligations = durableResourceAccessAuditObligations();
 
         AuthorizationPolicyRule searchRule = new AuthorizationPolicyRule(
                 ruleId,
@@ -1627,7 +1704,7 @@ public final class AuthzHostPolicyBootstrapBuilder {
                         ),
                         List.of(),
                         List.of(),
-                        List.copyOf(masks),
+                        masks,
                         "ALLOW_ORGANIZATIONAL_SCOPE"
                 ),
                 auditObligations
@@ -1647,23 +1724,157 @@ public final class AuthzHostPolicyBootstrapBuilder {
                         null,
                         List.of(),
                         List.of(),
-                        List.copyOf(masks),
+                        masks,
                         "ALLOW_ORGANIZATIONAL_SCOPE"
                 ),
                 auditObligations
         );
 
-        DecisionPointDescriptor dp = spec.decisionPoint();
-        String policyId = "pol-" + serviceKey + "-" + spec.resourceKey().replace('.', '-');
-        String unitKey = "unit:" + policyId + ":v1";
-
-        AuthorizationPolicyDefinition policy = new AuthorizationPolicyDefinition(
-                AuthorizationPolicyDefinition.SCHEMA_VERSION_V1,
-                policyId,
-                "1.0.0",
+        return addPolicy(buildPrimaryScopePolicyDefinition(
+                spec,
                 "Organizational Scope Policy for " + spec.resourceKey(),
                 "Declarative organizational scope and field masking policy",
                 Set.of("ORGANIZATIONAL_SCOPE"),
+                combinePolicyRules(List.of(searchRule, targetRule), additionalRules)
+        ));
+    }
+
+    /**
+     * Synthesizes and registers an {@code AUTHENTICATED_SHARED} primary policy for shared catalog
+     * resources accessible across tenants to any authenticated principal.
+     */
+    public AuthzHostPolicyBootstrapBuilder addAuthenticatedSharedPolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String ruleId,
+            Map<String, String> redactConstantMasksByAttributeId
+    ) {
+        return addAuthenticatedSharedPolicy(
+                spec,
+                ruleId,
+                toRedactConstantMasks(redactConstantMasksByAttributeId),
+                List.of()
+        );
+    }
+
+    /**
+     * Synthesizes and registers an {@code AUTHENTICATED_SHARED} primary policy with explicit
+     * {@link MaskContributionSpec} directives.
+     */
+    public AuthzHostPolicyBootstrapBuilder addAuthenticatedSharedPolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String ruleId,
+            List<MaskContributionSpec> maskDirectives
+    ) {
+        return addAuthenticatedSharedPolicy(spec, ruleId, maskDirectives, List.of());
+    }
+
+    /**
+     * Synthesizes and registers an {@code AUTHENTICATED_SHARED} primary policy with explicit
+     * {@link MaskContributionSpec} directives and optional additional {@link AuthorizationPolicyRule}s.
+     */
+    public AuthzHostPolicyBootstrapBuilder addAuthenticatedSharedPolicy(
+            AuthzResourceGovernanceSpec<?> spec,
+            String ruleId,
+            List<MaskContributionSpec> maskDirectives,
+            List<AuthorizationPolicyRule> additionalRules
+    ) {
+        Objects.requireNonNull(spec, "spec is required");
+        Objects.requireNonNull(ruleId, "ruleId is required");
+        List<MaskContributionSpec> masks = maskDirectives == null ? List.of() : List.copyOf(maskDirectives);
+        Map<String, Object> principalCondition = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
+        List<ObligationDirective> auditObligations = durableResourceAccessAuditObligations();
+
+        AuthorizationPolicyRule searchRule = new AuthorizationPolicyRule(
+                ruleId + "-shared-search",
+                "Authenticated shared SEARCH access for " + spec.resourceKey(),
+                Set.of(EvaluationMode.SEARCH),
+                new AuthorizationSourceCondition(
+                        AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                        ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                        principalCondition
+                ),
+                new AuthorizationRuleContributions(
+                        new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                        null,
+                        List.of(),
+                        List.of(),
+                        masks,
+                        "ALLOW_AUTHENTICATED_SHARED_SEARCH"
+                ),
+                auditObligations
+        );
+
+        AuthorizationPolicyRule targetRule = new AuthorizationPolicyRule(
+                ruleId + "-shared-target",
+                "Authenticated shared TARGET access for " + spec.resourceKey(),
+                Set.of(EvaluationMode.TARGET),
+                new AuthorizationSourceCondition(
+                        AuthorizationSourceCondition.LANGUAGE_PRAXIS_JSON_LOGIC,
+                        ConditionProfileKind.AUTHORIZATION_TARGET_V1,
+                        principalCondition
+                ),
+                new AuthorizationRuleContributions(
+                        new AccessContributionSpec(ContributionAuthority.GRANT, RuleEffect.ALLOW),
+                        null,
+                        List.of(),
+                        List.of(),
+                        masks,
+                        "ALLOW_AUTHENTICATED_SHARED_TARGET"
+                ),
+                auditObligations
+        );
+
+        return addPolicy(buildPrimaryScopePolicyDefinition(
+                spec,
+                "Authenticated Shared Policy for " + spec.resourceKey(),
+                "Declarative authenticated-shared admission and field masking policy",
+                Set.of("AUTHENTICATED_SHARED"),
+                combinePolicyRules(List.of(searchRule, targetRule), additionalRules)
+        ));
+    }
+
+    private static List<ObligationDirective> durableResourceAccessAuditObligations() {
+        return List.of(new ObligationDirective(
+                "DURABLE_AUDIT_EVIDENCE",
+                "ON_PERMIT",
+                "BEFORE_COMMIT_OUTBOX",
+                Map.of("auditCategory", "GOVERNED_RESOURCE_ACCESS")
+        ));
+    }
+
+    private static List<AuthorizationPolicyRule> combinePolicyRules(
+            List<AuthorizationPolicyRule> baseRules,
+            List<AuthorizationPolicyRule> additionalRules
+    ) {
+        if (additionalRules == null || additionalRules.isEmpty()) {
+            return List.copyOf(baseRules);
+        }
+        List<AuthorizationPolicyRule> merged = new ArrayList<>(baseRules.size() + additionalRules.size());
+        merged.addAll(baseRules);
+        additionalRules.stream().filter(Objects::nonNull).forEach(merged::add);
+        return List.copyOf(merged);
+    }
+
+    private AuthorizationPolicyDefinition buildPrimaryScopePolicyDefinition(
+            AuthzResourceGovernanceSpec<?> spec,
+            String title,
+            String description,
+            Set<String> categories,
+            List<AuthorizationPolicyRule> rules
+    ) {
+        DecisionPointDescriptor dp = spec.decisionPoint();
+        String policyId = "pol-" + serviceKey + "-" + spec.resourceKey().replace('.', '-');
+        String unitKey = "unit:" + policyId + ":v1";
+        Set<EvaluationMode> dpModes = dp.evaluationModes().isEmpty()
+                ? Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET)
+                : dp.evaluationModes();
+        return new AuthorizationPolicyDefinition(
+                AuthorizationPolicyDefinition.SCHEMA_VERSION_V1,
+                policyId,
+                "1.0.0",
+                title,
+                description,
+                categories,
                 dp.legalPurpose() != null ? dp.legalPurpose() : "STATUTORY_LEGAL_OBLIGATION",
                 dp.legalBasisRef() != null ? dp.legalBasisRef() : "LGPD:ART_7_III",
                 OpaProviderIoSchemas.COMBINING_PROFILE_V1,
@@ -1671,11 +1882,11 @@ public final class AuthzHostPolicyBootstrapBuilder {
                         "tgt-" + spec.resourceKey().replace('.', '-'),
                         dp.identity().pointKey(),
                         dp.descriptorDigest(),
-                        Set.of(EvaluationMode.SEARCH, EvaluationMode.TARGET)
+                        dpModes
                 )),
                 spec.dualScopeDelegationSpec(),
                 List.of(),
-                List.of(searchRule, targetRule),
+                rules,
                 List.of(new PolicyMaterializationTargetSpec(
                         "policy_engine",
                         "opa-policy",
@@ -1683,7 +1894,6 @@ public final class AuthzHostPolicyBootstrapBuilder {
                         OpaProviderIoSchemas.COMPILER_PROFILE_V1
                 ))
         );
-        return addPolicy(policy);
     }
 
     /**
@@ -1929,7 +2139,8 @@ public final class AuthzHostPolicyBootstrapBuilder {
                 admissionRecords,
                 bundleArtifact,
                 localTransport,
-                policies
+                policies,
+                resources.stream().map(RegisteredResourceEntry::spec).toList()
         );
     }
 }

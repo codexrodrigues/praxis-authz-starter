@@ -116,12 +116,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version='${{ steps.version.outputs.value }}'
+          upstream_version="$(python3 -c "import xml.etree.ElementTree as ET; root = ET.parse('pom.xml').getroot(); ns = {'m': 'http://maven.apache.org/POM/4.0.0'}; print(root.findtext('.//m:properties/m:praxis-authz.version', namespaces=ns) or '')")"
+          [[ -n "$upstream_version" ]] || {
+            echo '::error::Could not determine <praxis-authz.version> from pom.xml.'
+            exit 1
+          }
           for artifact in praxis-authz-contracts praxis-authz-enforcement-core praxis-authz-opa; do
-            url="https://repo1.maven.org/maven2/io/github/codexrodrigues/${artifact}/${version}/${artifact}-${version}.pom"
+            url="https://repo1.maven.org/maven2/io/github/codexrodrigues/${artifact}/${upstream_version}/${artifact}-${upstream_version}.pom"
             code="$(curl -L -sS -o /dev/null -w '%{http_code}' "$url")"
             [[ "$code" == '200' ]] || {
-              echo "::error::Upstream artifact ${artifact}:${version} is not available on Maven Central yet (HTTP ${code}: ${url})."
+              echo "::error::Upstream artifact ${artifact}:${upstream_version} is not available on Maven Central yet (HTTP ${code}: ${url})."
               exit 1
             }
           done

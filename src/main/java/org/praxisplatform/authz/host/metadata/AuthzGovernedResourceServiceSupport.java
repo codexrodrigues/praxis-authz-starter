@@ -694,11 +694,53 @@ public final class AuthzGovernedResourceServiceSupport {
             ResourceFilterAccessScope<E> hardScope,
             Object owner
     ) {
+        return authorizeAndResolveAccessScope(
+                decisionPoint,
+                factContractDigest,
+                requestHeaderNames,
+                Map.of(),
+                null,
+                resolvedSubjectAndEnvFacts,
+                factStatuses,
+                requestedFieldUses,
+                baselineFieldUseDirectives,
+                jpaDataScopeAdapter,
+                hardScopeJpql,
+                hardScopeParams,
+                criteriaTranslator,
+                hardScope,
+                owner
+        );
+    }
+
+    /**
+     * Owner-aware variant pushing a reentrant {@link QueryFrame} onto the LIFO authorization stack
+     * using validated incoming header values for anti-spoofing verification ({@code P02}, {@code P53}).
+     */
+    public <E> ResourceFilterAccessScope<E> authorizeAndResolveAccessScope(
+            DecisionPointDescriptor decisionPoint,
+            String factContractDigest,
+            Set<String> requestHeaderNames,
+            Map<String, String> requestHeaders,
+            String authoritativeTenantId,
+            Map<String, Object> resolvedSubjectAndEnvFacts,
+            Map<String, FactResolutionStatus> factStatuses,
+            Map<FieldUseCategory, Set<String>> requestedFieldUses,
+            List<FieldUseEffectDirective> baselineFieldUseDirectives,
+            JpaDataScopeAdapter jpaDataScopeAdapter,
+            String hardScopeJpql,
+            Map<String, Object> hardScopeParams,
+            JpaCriteriaDataScopeTranslator criteriaTranslator,
+            ResourceFilterAccessScope<E> hardScope,
+            Object owner
+    ) {
         registerTransactionCleanupIfActive();
         AuthorizedQueryScopeContext queryCtx = authorizationSeam.authorizeAndCompileJpaQueryScope(
                 decisionPoint,
                 factContractDigest,
                 requestHeaderNames,
+                requestHeaders,
+                authoritativeTenantId,
                 resolvedSubjectAndEnvFacts,
                 factStatuses,
                 requestedFieldUses,
@@ -1202,6 +1244,8 @@ public final class AuthzGovernedResourceServiceSupport {
             DecisionPointDescriptor actionDecisionPoint,
             String factContractDigest,
             Set<String> incomingHeaderNames,
+            Map<String, String> incomingHeaders,
+            String authoritativeTenantId,
             Map<String, Object> resolvedSubjectFacts,
             Map<String, FactResolutionStatus> factStatuses,
             JpaDataScopeAdapter jpaDataScopeAdapter,
@@ -1212,6 +1256,8 @@ public final class AuthzGovernedResourceServiceSupport {
                 actionDecisionPoint,
                 factContractDigest,
                 incomingHeaderNames == null ? Set.of() : incomingHeaderNames,
+                incomingHeaders == null ? Map.of() : incomingHeaders,
+                authoritativeTenantId,
                 resolvedSubjectFacts,
                 factStatuses,
                 Map.of(),

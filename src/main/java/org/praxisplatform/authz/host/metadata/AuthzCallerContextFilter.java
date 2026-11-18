@@ -115,6 +115,9 @@ public final class AuthzCallerContextFilter extends OncePerRequestFilter {
         if (callerContext.incomingHeaderNames().isEmpty() && !headerNames.isEmpty()) {
             callerContext = callerContext.withIncomingHeaderNames(headerNames);
         }
+        if (callerContext.incomingHeaders().isEmpty() && !rawHeaders.isEmpty()) {
+            callerContext = callerContext.withIncomingHeaders(rawHeaders);
+        }
 
         IOException[] ioEx = new IOException[1];
         ServletException[] servletEx = new ServletException[1];
