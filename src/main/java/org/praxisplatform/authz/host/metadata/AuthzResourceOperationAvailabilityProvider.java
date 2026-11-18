@@ -74,6 +74,9 @@ public final class AuthzResourceOperationAvailabilityProvider
                     ? Map.of()
                     : Map.copyOf(trustedSubjectFactStatuses);
             allowedHardScopeValues = allowedHardScopeValues == null ? null : Set.copyOf(allowedHardScopeValues);
+            readOnlyConsolidation = readOnlyConsolidation
+                    || Boolean.TRUE.equals(trustedSubjectFacts.get(AuthzCallerContext.FACT_READ_ONLY_CONSOLIDATION_SCOPE))
+                    || Boolean.TRUE.equals(trustedSubjectFacts.get("subject.readOnlyConsolidationScope"));
         }
 
         /** Backward-compatible 7-argument constructor. */
@@ -631,11 +634,20 @@ public final class AuthzResourceOperationAvailabilityProvider
         }
         if ("view".equals(op)
                 || "detail".equals(op)
+                || "byid".equals(op)
+                || "all".equals(op)
                 || "filter".equals(op)
+                || "cursor".equals(op)
+                || "filter-cursor".equals(op)
+                || "locate".equals(op)
                 || "list".equals(op)
                 || "export".equals(op)
                 || "stats".equals(op)
+                || op.startsWith("stats")
                 || "options".equals(op)
+                || "optionsources".equals(op)
+                || "option-sources".equals(op)
+                || "by-ids".equals(op)
                 || "schemas".equals(op)) {
             return false;
         }
@@ -835,6 +847,7 @@ public final class AuthzResourceOperationAvailabilityProvider
             consolidationMeta.put("advisoryOnly", true);
             consolidationMeta.put("requiresRuntimeRevalidation", true);
             consolidationMeta.put("revalidatedOnExecution", true);
+            consolidationMeta.put("readOnlyConsolidation", true);
             consolidationMeta.put(
                     "denialCategory",
                     OperationAvailabilityEvaluation.classifyDenialCategory("consolidation-read-only-scope")

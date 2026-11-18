@@ -1477,6 +1477,7 @@ class Wave3StarterHotfixRegressionTest {
                     );
                     assertFalse(deniedForm.allowed());
                     assertEquals("consolidation-read-only-scope", deniedForm.reason());
+                    assertEquals(Boolean.TRUE, deniedForm.metadata().get("readOnlyConsolidation"));
 
                     AvailabilityDecision deniedAction = availabilityProvider.evaluate(
                             homologateActionDef,
@@ -1487,6 +1488,7 @@ class Wave3StarterHotfixRegressionTest {
                     );
                     assertFalse(deniedAction.allowed());
                     assertEquals("consolidation-read-only-scope", deniedAction.reason());
+                    assertEquals(Boolean.TRUE, deniedAction.metadata().get("readOnlyConsolidation"));
 
                     AvailabilityDecision deniedEdit = availabilityProvider.evaluate(
                             ResourceOperationAvailabilityContext.item(
@@ -1495,10 +1497,247 @@ class Wave3StarterHotfixRegressionTest {
                     );
                     assertFalse(deniedEdit.allowed());
                     assertEquals("consolidation-read-only-scope", deniedEdit.reason());
+                    assertEquals(Boolean.TRUE, deniedEdit.metadata().get("readOnlyConsolidation"));
                 }
             });
         } finally {
             emfBean.destroy();
+        }
+    }
+
+    @Test
+    void legacyCallerAvailabilityContextConstructorsAndReadOnlyPostOperationsRespectConsolidationScope() {
+        AuthzResourceGovernanceSpec<Beta7BenefitsCaseEntity> caseSpec =
+                AuthzResourceGovernanceSpec.<Beta7BenefitsCaseEntity>builder("workforce.benefits-cases")
+                        .serviceKey("workforce-svc")
+                        .tenantField("organizationId")
+                        .workflowAction("homologate", Set.of())
+                        .uiSurface("detail", "GET", "/api/workforce/benefits-cases/{id}/surfaces/detail")
+                        .uiSurface("view-page", "GET", "/api/workforce/benefits-cases/{id}/surfaces/view-page")
+                        .uiSurface("create-form", "POST", "/api/workforce/benefits-cases/surfaces/create-form")
+                        .uiSurface("review-form", "PATCH", "/api/workforce/benefits-cases/{id}/review-form")
+                        .introspectFromResource(
+                                Beta7BenefitsCaseEntity.class,
+                                Beta7BenefitsCaseEntity.class,
+                                Beta7CaseFilter.class,
+                                Beta7BenefitsCaseEntity.class,
+                                Beta7BenefitsCaseEntity.class,
+                                null,
+                                null
+                        )
+                        .build();
+
+        Map<String, Object> principalPresent = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("workforce-svc")
+                        .addResourceSpec(caseSpec, Beta7BenefitsCaseEntity.class, Beta7BenefitsCaseEntity.class, Beta7BenefitsCaseEntity.class)
+                        .addOrganizationalScopePolicy(
+                                caseSpec,
+                                "rule-workforce-benefits-cases-scope",
+                                "resource.organizationId",
+                                "subject.organizationUnitIds",
+                                List.of(),
+                                List.of()
+                        )
+                        .addActionPolicy(caseSpec, "homologate", "rule-benefits-homologate", principalPresent)
+                        .addSurfacePolicy(caseSpec, "detail", "rule-benefits-detail", principalPresent, List.of())
+                        .addSurfacePolicy(caseSpec, "view-page", "rule-benefits-view-page", principalPresent, List.of())
+                        .addSurfacePolicy(caseSpec, "create-form", "rule-benefits-create-form", principalPresent, List.of())
+                        .addSurfacePolicy(caseSpec, "review-form", "rule-benefits-review-form", principalPresent, List.of())
+                        .build();
+
+        String dbName = "wave3_beta8_consolidation_" + UUID.randomUUID().toString().replace("-", "");
+        DriverManagerDataSource ds = new DriverManagerDataSource(
+                "jdbc:h2:mem:" + dbName + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
+        TransactionTemplate txTemplate = new TransactionTemplate(new DataSourceTransactionManager(ds));
+        MetadataResourceAuthorizationSeam seam = createSeam(bundle, txTemplate, jdbcTemplate);
+
+        Beta7BenefitsCaseEntity inScopeCase = new Beta7BenefitsCaseEntity();
+        inScopeCase.id = 101L;
+        inScopeCase.organizationId = 10L;
+        inScopeCase.processNumber = "PROC-101";
+        inScopeCase.workflowStatus = "DRAFT";
+
+        SurfaceDefinition detailSurfaceDef = new SurfaceDefinition(
+                "detail", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", SurfaceKind.READ_PROJECTION, SurfaceScope.ITEM, "Detail 360", "Detail summary",
+                "detail", "visibility", "response", SurfaceResponseCardinality.OBJECT,
+                null, null, 1, List.of(), List.of(), List.of(), null
+        );
+        SurfaceDefinition viewSurfaceDef = new SurfaceDefinition(
+                "view-page", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", SurfaceKind.VIEW, SurfaceScope.ITEM, "View Page", "Read-only view",
+                "viewPage", "visibility", "response", SurfaceResponseCardinality.OBJECT,
+                null, null, 2, List.of(), List.of(), List.of(), null
+        );
+        SurfaceDefinition createFormSurfaceDef = new SurfaceDefinition(
+                "create-form", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", SurfaceKind.FORM, SurfaceScope.COLLECTION, "Create Form", "Collection create form",
+                "createForm", "visibility", "request", SurfaceResponseCardinality.OBJECT,
+                null, null, 3, List.of(), List.of(), List.of(), null
+        );
+        SurfaceDefinition reviewFormSurfaceDef = new SurfaceDefinition(
+                "review-form", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", SurfaceKind.PARTIAL_FORM, SurfaceScope.ITEM, "Review Form", "Partial review form",
+                "reviewForm", "visibility", "response", SurfaceResponseCardinality.OBJECT,
+                null, null, 4, List.of(), List.of(), List.of(), null
+        );
+        ActionDefinition homologateActionDef = new ActionDefinition(
+                "homologate", "workforce.benefits-cases", "/api/workforce/benefits-cases",
+                "workforce", ActionScope.ITEM, "Homologate", "Approve case",
+                null, null, null, 10, "APPROVED", List.of(), List.of("DRAFT"), List.of(),
+                ActionExecutionContract.defaults(ActionScope.ITEM)
+        );
+
+        Map<String, Object> consolidationFacts = Map.of(
+                "subject.principalId", "auditor-1",
+                "subject.organizationUnitIds", List.of(10L, 99L),
+                AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS, List.of(10L, 99L),
+                AuthzCallerContext.FACT_READ_ONLY_CONSOLIDATION_SCOPE, true
+        );
+        Map<String, FactResolutionStatus> consolidationStatuses = Map.of(
+                "subject.principalId", FactResolutionStatus.PRESENT,
+                "subject.organizationUnitIds", FactResolutionStatus.PRESENT,
+                AuthzCallerContext.FACT_AUTHORIZED_ORGANIZATION_IDS, FactResolutionStatus.PRESENT,
+                AuthzCallerContext.FACT_READ_ONLY_CONSOLIDATION_SCOPE, FactResolutionStatus.PRESENT
+        );
+
+        List<AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext> legacyContexts = List.of(
+                new AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext(
+                        consolidationFacts,
+                        consolidationStatuses,
+                        true,
+                        false
+                ),
+                new AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext(
+                        consolidationFacts,
+                        consolidationStatuses,
+                        true,
+                        false,
+                        "10"
+                )
+        );
+
+        for (AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext callerFactCtx : legacyContexts) {
+            assertTrue(callerFactCtx.readOnlyConsolidation(),
+                    "Legacy 4/5-arg constructors must inherit readOnlyConsolidation from trustedSubjectFacts");
+
+            AuthzResourceOperationAvailabilityProvider provider = new AuthzResourceOperationAvailabilityProvider(seam);
+            provider.registerResourceBinding(new AuthzResourceOperationAvailabilityProvider.ResourceAvailabilityPolicyBinding(
+                    caseSpec.resourceKey(),
+                    caseSpec.decisionPoint(),
+                    caseSpec.factContractDigest(),
+                    caseSpec.dualScopeDelegationSpec(),
+                    caseSpec.operationModifiedAttributes(),
+                    () -> callerFactCtx,
+                    caseSpec::extractSnapshotTargetFacts,
+                    rawId -> Optional.of(caseSpec.toResourceStateSnapshot(inScopeCase)),
+                    null,
+                    null,
+                    caseSpec.actionDecisionPoints(),
+                    caseSpec.surfaceDecisionPoints()
+            ));
+
+            // Mutating operations, workflow actions, and FORM / PARTIAL_FORM surfaces must be denied
+            List<AvailabilityDecision> mutatingDenials = List.of(
+                    provider.evaluate(new ResourceOperationAvailabilityContext(
+                            "workforce.benefits-cases", "/api/workforce/benefits-cases", "create",
+                            "COLLECTION", null, null, Map.of("preferredMethod", "POST")
+                    )),
+                    provider.evaluate(new ResourceOperationAvailabilityContext(
+                            "workforce.benefits-cases", "/api/workforce/benefits-cases", "edit",
+                            "ITEM", 101L, null, Map.of("preferredMethod", "PATCH")
+                    )),
+                    provider.evaluate(new ResourceOperationAvailabilityContext(
+                            "workforce.benefits-cases", "/api/workforce/benefits-cases", "delete",
+                            "ITEM", 101L, null, Map.of("preferredMethod", "DELETE")
+                    )),
+                    provider.evaluate(
+                            homologateActionDef,
+                            new ActionAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                            )
+                    ),
+                    provider.evaluate(
+                            createFormSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", null,
+                                    "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                            )
+                    ),
+                    provider.evaluate(
+                            reviewFormSurfaceDef,
+                            new SurfaceAvailabilityContext(
+                                    "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                                    "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                            )
+                    )
+            );
+            for (AvailabilityDecision denied : mutatingDenials) {
+                assertFalse(denied.allowed(), "Expected mutating operation/action/form surface to be denied");
+                assertEquals("consolidation-read-only-scope", denied.reason());
+                assertEquals(Boolean.TRUE, denied.metadata().get("readOnlyConsolidation"));
+            }
+
+            // VIEW and READ_PROJECTION surfaces remain allowed
+            assertTrue(provider.evaluate(
+                    viewSurfaceDef,
+                    new SurfaceAvailabilityContext(
+                            "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                            "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                    )
+            ).allowed());
+            assertTrue(provider.evaluate(
+                    detailSurfaceDef,
+                    new SurfaceAvailabilityContext(
+                            "workforce.benefits-cases", "/api/workforce/benefits-cases", 101L,
+                            "10", java.util.Locale.ROOT, () -> "auditor-1", Set.of(), null
+                    )
+            ).allowed());
+
+            // Canonical read-only POST (and GET) capability operations remain allowed
+            for (String collectionReadOp : List.of(
+                    "cursor",
+                    "filter-cursor",
+                    "optionSources",
+                    "option-sources",
+                    "by-ids",
+                    "statsGroupBy",
+                    "statsTimeSeries",
+                    "statsDistribution",
+                    "statsComparison",
+                    "locate",
+                    "all"
+            )) {
+                AvailabilityDecision readDecision = provider.evaluate(new ResourceOperationAvailabilityContext(
+                        "workforce.benefits-cases",
+                        "/api/workforce/benefits-cases",
+                        collectionReadOp,
+                        "COLLECTION",
+                        null,
+                        null,
+                        Map.of("preferredMethod", "POST")
+                ));
+                assertTrue(readDecision.allowed(),
+                        "Expected canonical read-only operation '" + collectionReadOp
+                                + "' with preferredMethod=POST to remain allowed, got reason="
+                                + readDecision.reason());
+            }
+
+            AvailabilityDecision byIdDecision = provider.evaluate(new ResourceOperationAvailabilityContext(
+                    "workforce.benefits-cases",
+                    "/api/workforce/benefits-cases",
+                    "byId",
+                    "ITEM",
+                    101L,
+                    null,
+                    Map.of("preferredMethod", "POST")
+            ));
+            assertTrue(byIdDecision.allowed(),
+                    "Expected canonical read-only operation 'byId' to remain allowed, got reason="
+                            + byIdDecision.reason());
         }
     }
 }
