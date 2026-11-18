@@ -8,8 +8,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.persistence.Entity;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -34,6 +38,9 @@ import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
 import org.praxisplatform.authz.contracts.envelope.GateOutcome;
 import org.praxisplatform.authz.contracts.envelope.MaskDirective;
 import org.praxisplatform.authz.contracts.envelope.ProviderEvaluationEnvelope;
+import org.praxisplatform.authz.contracts.obligation.DefaultObligationHandlerRegistry;
+import org.praxisplatform.authz.contracts.policy.MaskContributionSpec;
+import org.praxisplatform.authz.contracts.policy.PolicyFieldSelector;
 import org.praxisplatform.authz.enforcement.fielduse.FieldUseQueryGuard;
 import org.praxisplatform.authz.enforcement.masking.DetachedDtoMaskingProcessor;
 import org.praxisplatform.authz.enforcement.obligation.ObligationBarrierCoordinator;
@@ -42,11 +49,16 @@ import org.praxisplatform.authz.enforcement.writeintent.DtoWriteIntentExtractor;
 import org.praxisplatform.authz.enforcement.writeintent.FieldWriteAuthorizer;
 import org.praxisplatform.authz.export.GovernedCollectionExportGuard;
 import org.praxisplatform.authz.host.metadata.AuthzCallerContext;
+import org.praxisplatform.authz.host.metadata.AuthzHostPolicyBootstrapBuilder;
+import org.praxisplatform.authz.host.metadata.AuthzResourceGovernanceSpec;
 import org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityProvider;
 import org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityProvider.CallerAvailabilityFactContext;
 import org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityProvider.ResourceAvailabilityPolicyBinding;
 import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector;
 import org.praxisplatform.authz.host.metadata.ThreadLocalAuthzCallerContextProvider;
+import org.praxisplatform.authz.opa.client.OpaAuthorizationProviderAdapter;
+import org.praxisplatform.authz.opa.revision.SameInstanceSearchRevisionGuard;
+import org.praxisplatform.authz.outbox.JdbcTransactionalAuditOutbox;
 import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam;
@@ -555,5 +567,202 @@ class AuthzAgentAuthorizationBridgeTest {
         assertFalse(projected.modelSafeRecord().containsKey("sensitiveHealthCode"));
         assertTrue(projected.modelSafeRecord().containsKey("personalTaxId"));
         assertFalse(projected.modelSafeRecord().get("personalTaxId").toString().contains("52998224725"));
+    }
+
+    @Entity
+    static class WorkforceCompensationEntity {
+        @jakarta.persistence.Id
+        public Long id;
+        public Integer orgUnitId;
+        public String employeeName;
+        public String bankCode;
+        public BigDecimal bonusAmount;
+    }
+
+    public static class WorkforceCompensationResponseDto {
+        public Long id;
+        public Integer orgUnitId;
+
+        @UISchema(label = "Employee")
+        public String employeeName;
+
+        @Schema(nullable = true, description = "Bank code")
+        @DomainGovernance(
+                classification = DomainClassification.CONFIDENTIAL,
+                aiUsage = @AiUsagePolicy(visibility = AiVisibilityMode.ALLOW))
+        public String bankCode;
+
+        @Schema(nullable = true, description = "Bonus amount")
+        @DomainGovernance(
+                classification = DomainClassification.CONFIDENTIAL,
+                aiUsage = @AiUsagePolicy(visibility = AiVisibilityMode.ALLOW))
+        public BigDecimal bonusAmount;
+    }
+
+    @ApiResource(value = "/api/workforce/compensations", resourceKey = "workforce.compensations", title = "Compensations")
+    static class WorkforceCompensationController extends AbstractResourceQueryController<WorkforceCompensationResponseDto, Long, EmptyFilterDto> {
+        private final BaseResourceQueryService<WorkforceCompensationResponseDto, Long, EmptyFilterDto> service = new BaseResourceQueryService<>() {
+            @Override public String getIdFieldName() { return "id"; }
+            @Override public Sort getDefaultSort() { return Sort.by("id"); }
+            @Override public Optional<String> getDatasetVersion() { return Optional.empty(); }
+            @Override public StatsSupportMode getGroupByStatsSupportMode() { return StatsSupportMode.DISABLED; }
+            @Override public StatsSupportMode getTimeSeriesStatsSupportMode() { return StatsSupportMode.DISABLED; }
+            @Override public StatsSupportMode getDistributionStatsSupportMode() { return StatsSupportMode.DISABLED; }
+            @Override public StatsFieldRegistry getStatsFieldRegistry() { return null; }
+            @Override public OptionSourceRegistry getOptionSourceRegistry() { return null; }
+            @Override public boolean hasOptionSource(String key) { return false; }
+            @Override public OptionSourceDescriptor resolveOptionSource(String key) { return null; }
+            @Override public List<WorkforceCompensationResponseDto> findAll() { return List.of(); }
+            @Override public List<WorkforceCompensationResponseDto> findAllById(Collection<Long> ids) { return List.of(); }
+            @Override public ResourceRepresentationResult<WorkforceCompensationResponseDto> findById(Long id) { return null; }
+            @Override public Page<WorkforceCompensationResponseDto> filter(EmptyFilterDto f, Pageable p, Collection<Long> ids) { return Page.empty(); }
+            @Override public CursorPage<WorkforceCompensationResponseDto> filterByCursor(EmptyFilterDto f, Sort s, String a, String c, int l) { return null; }
+            @Override public java.util.OptionalLong locate(EmptyFilterDto f, Sort s, Long id) { return java.util.OptionalLong.empty(); }
+            @Override public Page<OptionDTO<Long>> filterOptions(EmptyFilterDto f, Pageable p) { return Page.empty(); }
+            @Override public List<OptionDTO<Long>> byIdsOptions(Collection<Long> ids) { return List.of(); }
+            @Override public Page<OptionDTO<Object>> filterOptionSourceOptions(String k, OptionSourceFilterRequest<EmptyFilterDto> r, Pageable p) { return Page.empty(); }
+            @Override public List<OptionDTO<Object>> byIdsOptionSourceOptions(String k, Collection<Object> ids) { return List.of(); }
+            @Override public GroupByStatsResponse groupByStats(GroupByStatsRequest<EmptyFilterDto> r) { return null; }
+            @Override public TimeSeriesStatsResponse timeSeriesStats(TimeSeriesStatsRequest<EmptyFilterDto> r) { return null; }
+            @Override public DistributionStatsResponse distributionStats(DistributionStatsRequest<EmptyFilterDto> r) { return null; }
+            @Override public ComparisonStatsResponse comparisonStats(ComparisonStatsRequest<EmptyFilterDto> r) { return null; }
+        };
+
+        @Override protected BaseResourceQueryService<WorkforceCompensationResponseDto, Long, EmptyFilterDto> getService() { return service; }
+        @Override protected Long getResponseId(WorkforceCompensationResponseDto dto) { return dto.id; }
+    }
+
+    @Test
+    void resolvesBasePathExtractsTargetFactsAppliesNullifyMasksAndSkipsOutboxInReadOnlyTx() {
+        AuthzResourceGovernanceSpec<WorkforceCompensationEntity> spec =
+                AuthzResourceGovernanceSpec.fromAnnotatedResource(
+                        "praxis-workforce-showcase",
+                        "orgUnitId",
+                        WorkforceCompensationEntity.class,
+                        WorkforceCompensationResponseDto.class,
+                        EmptyFilterDto.class,
+                        WorkforceCompensationController.class);
+
+        String bankAttrId = spec.factContract().descriptorsByPath().get("resource.bankCode").attributeId();
+        String bonusAttrId = spec.factContract().descriptorsByPath().get("resource.bonusAmount").attributeId();
+
+        AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle bundle =
+                AuthzHostPolicyBootstrapBuilder.forService("praxis-workforce-showcase")
+                        .addResourceSpec(spec, WorkforceCompensationResponseDto.class, null, null)
+                        .addOrganizationalScopePolicy(
+                                spec,
+                                "rule-workforce-comp-scope",
+                                "resource.orgUnitId",
+                                "subject.organizationUnitIds",
+                                List.of(
+                                        new MaskContributionSpec(
+                                                PolicyFieldSelector.exact(Set.of(bankAttrId)),
+                                                "REDACT_CONSTANT",
+                                                Map.of("replacement", "***")),
+                                        new MaskContributionSpec(
+                                                PolicyFieldSelector.exact(Set.of(bonusAttrId)),
+                                                "NULLIFY",
+                                                Map.of())))
+                        .build();
+
+        RuntimeDecisionPointRegistry registry = new RuntimeDecisionPointRegistry(
+                bundle.admissionRecords(),
+                bundle.coordinates());
+        OpaAuthorizationProviderAdapter opaAdapter = new OpaAuthorizationProviderAdapter(
+                bundle.localOpaTransport(),
+                new SameInstanceSearchRevisionGuard(1));
+
+        org.springframework.jdbc.datasource.DriverManagerDataSource ds =
+                new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                        "jdbc:h2:mem:authz_agent_bridge_ro_test;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTransactionalAuditOutbox jdbcOutbox = new JdbcTransactionalAuditOutbox(
+                new org.springframework.jdbc.core.JdbcTemplate(ds),
+                "praxis_authz_obligation_outbox",
+                true,
+                true);
+
+        DetachedDtoMaskingProcessor maskingProcessor = new DetachedDtoMaskingProcessor();
+        GovernedExportAndAiToolAuthorizationSeam seam = new GovernedExportAndAiToolAuthorizationSeam(
+                registry,
+                opaAdapter,
+                new FieldUseQueryGuard(),
+                maskingProcessor,
+                new ObligationBarrierCoordinator(new DefaultObligationHandlerRegistry(), jdbcOutbox),
+                new GovernedCollectionExportGuard(maskingProcessor),
+                new SanitizedAuthorizationTelemetryPublisher(List.of(), 10));
+
+        ThreadLocalAuthzCallerContextProvider callerProvider = new ThreadLocalAuthzCallerContextProvider();
+        callerProvider.setContext(new AuthzCallerContext(
+                "tenant-a",
+                Map.of(
+                        "subject.principalId", "alice",
+                        "subject.tenantId", "tenant-a",
+                        "subject.organizationUnitIds", List.of(10L)),
+                Map.of(
+                        "subject.principalId", FactResolutionStatus.PRESENT,
+                        "subject.tenantId", FactResolutionStatus.PRESENT,
+                        "subject.organizationUnitIds", FactResolutionStatus.PRESENT),
+                Set.of(),
+                Map.of()));
+
+        AuthzAgentAuthorizationBridge bridge = new AuthzAgentAuthorizationBridge(
+                new DefaultMetadataGovernanceAgentAuthorizationBridge(),
+                seam,
+                registry,
+                callerProvider,
+                new MetadataDtoGovernanceIntrospector(),
+                null,
+                Map.of());
+
+        AgentExecutionContext execContext = new AgentExecutionContext(
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "tenant-a", "alice", "prod", "alice", Set.of("ROLE_USER"),
+                null, null, Map.of(), Map.of());
+
+        Map<String, Object> authorizedRecord = new LinkedHashMap<>();
+        authorizedRecord.put("id", 42L);
+        authorizedRecord.put("orgUnitId", 10);
+        authorizedRecord.put("employeeName", "Beatriz Costa");
+        authorizedRecord.put("bankCode", "341");
+        authorizedRecord.put("bonusAmount", new BigDecimal("1850.00"));
+
+        Map<String, Object> unauthorizedRecord = new LinkedHashMap<>(authorizedRecord);
+        unauthorizedRecord.put("orgUnitId", 99);
+
+        org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(true);
+        org.springframework.transaction.support.TransactionSynchronizationManager.setCurrentTransactionReadOnly(true);
+        try {
+            DualProjectedPayload projected = bridge.projectRecord(
+                    execContext,
+                    "/api/workforce/compensations",
+                    WorkforceCompensationResponseDto.class,
+                    authorizedRecord);
+
+            assertEquals(42L, projected.uiRecord().get("id"));
+            assertEquals(10, projected.uiRecord().get("orgUnitId"));
+            assertEquals("Beatriz Costa", projected.uiRecord().get("employeeName"));
+            assertEquals("***", projected.uiRecord().get("bankCode"));
+            assertTrue(projected.uiRecord().containsKey("bonusAmount"));
+            assertNull(projected.uiRecord().get("bonusAmount"));
+
+            assertEquals(42L, projected.modelSafeRecord().get("id"));
+            assertEquals(10, projected.modelSafeRecord().get("orgUnitId"));
+            assertEquals("Beatriz Costa", projected.modelSafeRecord().get("employeeName"));
+            assertEquals("***", projected.modelSafeRecord().get("bankCode"));
+            assertTrue(projected.modelSafeRecord().containsKey("bonusAmount"));
+            assertNull(projected.modelSafeRecord().get("bonusAmount"));
+            assertTrue(projected.maskedForAiFields().contains("bankCode"));
+            assertTrue(projected.maskedForAiFields().contains("bonusAmount"));
+
+            assertThrows(SecurityException.class, () -> bridge.projectRecord(
+                    execContext,
+                    "/api/workforce/compensations",
+                    WorkforceCompensationResponseDto.class,
+                    unauthorizedRecord));
+        } finally {
+            org.springframework.transaction.support.TransactionSynchronizationManager.setCurrentTransactionReadOnly(false);
+            org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(false);
+            callerProvider.clearContext();
+        }
     }
 }

@@ -1,5 +1,6 @@
 package org.praxisplatform.authz.agent;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -10,9 +11,14 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.praxisplatform.authz.contracts.context.FactContract;
+import org.praxisplatform.authz.contracts.context.FactDescriptor;
 import org.praxisplatform.authz.contracts.context.FactResolutionStatus;
+import org.praxisplatform.authz.contracts.context.FactValueType;
 import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor;
+import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointKind;
 import org.praxisplatform.authz.contracts.decisionpoint.EvaluationMode;
+import org.praxisplatform.authz.contracts.envelope.MaskDirective;
 import org.praxisplatform.authz.enforcement.masking.DtoFieldSchemaMetadata;
 import org.praxisplatform.authz.host.metadata.AuthzCallerContext;
 import org.praxisplatform.authz.host.metadata.AuthzResourceOperationAvailabilityProvider;
@@ -20,8 +26,9 @@ import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector;
 import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract;
 import org.praxisplatform.authz.host.metadata.ThreadLocalAuthzCallerContextProvider;
 import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam;
-import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.SanitizedAiToolProjection;
+import org.praxisplatform.authz.seams.GovernedExportAndAiToolAuthorizationSeam.OperationalAgentOpaProjection;
 import org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry;
+import org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry.RegisteredDecisionPointContext;
 import org.praxisplatform.config.ai.agent.bridge.DefaultMetadataGovernanceAgentAuthorizationBridge;
 import org.praxisplatform.config.ai.agent.spi.AgentAuthorizationBridge;
 import org.praxisplatform.config.ai.agent.spi.AgentExecutionContext;
@@ -157,6 +164,13 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
             List<DtoFieldSchemaMetadata> fieldSchemas = contract != null
                     ? contract.fieldSchemas()
                     : deriveAdHocSchemas(rawRecord);
+            Map<String, String> attributeToWire = new LinkedHashMap<>();
+            for (DtoFieldSchemaMetadata schema : fieldSchemas) {
+                if (schema.attributeId() != null && schema.wireFieldName() != null) {
+                    attributeToWire.putIfAbsent(schema.attributeId(), schema.wireFieldName());
+                }
+            }
+
             Map<String, Object> trustedFacts = new LinkedHashMap<>();
             Map<String, FactResolutionStatus> trustedStatuses = new LinkedHashMap<>();
 
@@ -168,13 +182,33 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
                 trustedStatuses.putAll(caller.factStatuses());
             } else if (context != null) {
                 if (context.userId() != null) {
+                    trustedFacts.put("subject.principalId", context.userId());
+                    trustedStatuses.put("subject.principalId", FactResolutionStatus.PRESENT);
                     trustedFacts.put("subject.id", context.userId());
                     trustedStatuses.put("subject.id", FactResolutionStatus.PRESENT);
                 }
                 if (context.tenantId() != null) {
+                    trustedFacts.put("subject.tenantId", context.tenantId());
+                    trustedStatuses.put("subject.tenantId", FactResolutionStatus.PRESENT);
                     trustedFacts.put("tenant.id", context.tenantId());
                     trustedStatuses.put("tenant.id", FactResolutionStatus.PRESENT);
                 }
+                if (context.authorities() != null) {
+                    trustedFacts.put("subject.roles", List.copyOf(context.authorities()));
+                    trustedStatuses.put("subject.roles", FactResolutionStatus.PRESENT);
+                }
+            }
+
+            Optional<RegisteredDecisionPointContext> registeredPoint = decisionPointRegistry != null
+                    ? decisionPointRegistry.findRegisteredPoint(pointKey)
+                    : Optional.empty();
+            if (registeredPoint.isPresent() && registeredPoint.get().factContract() != null) {
+                extractResourceTargetFacts(
+                        rawRecord,
+                        registeredPoint.get().factContract(),
+                        attributeToWire,
+                        trustedFacts,
+                        trustedStatuses);
             }
             if (rawRecord.containsKey("id") && rawRecord.get("id") != null) {
                 trustedFacts.putIfAbsent("resource.id", rawRecord.get("id"));
@@ -185,25 +219,60 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
                     : (context != null && context.tenantId() != null ? context.tenantId() : "default");
             String env = context != null && context.environment() != null ? context.environment() : "prod";
 
-            SanitizedAiToolProjection opaProjected = aiToolSeam.authorizeAndProjectAiToolPayloadByPointKey(
+            OperationalAgentOpaProjection opaProjected = aiToolSeam.projectOperationalAgentRecord(
                     pointKey,
                     tenantId,
                     env,
-                    Collections.unmodifiableMap(modelSafeRecord),
+                    Collections.unmodifiableMap(new LinkedHashMap<>(uiRecord)),
+                    Collections.unmodifiableMap(new LinkedHashMap<>(modelSafeRecord)),
                     fieldSchemas,
                     trustedFacts,
                     trustedStatuses);
 
-            Set<String> allowedWireColumns = new LinkedHashSet<>(opaProjected.allowedWireColumns());
-            List<String> modelKeys = new ArrayList<>(modelSafeRecord.keySet());
-            for (String key : modelKeys) {
-                if (!allowedWireColumns.contains(key) || !opaProjected.detachedPayload().containsKey(key)) {
+            Set<String> wireFieldsHiddenByOpa = new LinkedHashSet<>();
+            for (DtoFieldSchemaMetadata schema : fieldSchemas) {
+                if (opaProjected.dynamicValueDeniedAttributeIds().contains(schema.attributeId())) {
+                    wireFieldsHiddenByOpa.add(schema.wireFieldName());
+                }
+            }
+            Set<String> maskedAttributeIds = new LinkedHashSet<>();
+            for (MaskDirective dir : opaProjected.activeMaskDirectives()) {
+                if (dir.attributeId() != null) {
+                    maskedAttributeIds.add(dir.attributeId());
+                }
+            }
+            Set<String> wireFieldsMaskedByOpa = new LinkedHashSet<>();
+            for (DtoFieldSchemaMetadata schema : fieldSchemas) {
+                if (maskedAttributeIds.contains(schema.attributeId())) {
+                    wireFieldsMaskedByOpa.add(schema.wireFieldName());
+                }
+            }
+
+            for (String key : new ArrayList<>(uiRecord.keySet())) {
+                if (wireFieldsHiddenByOpa.contains(key)) {
+                    uiRecord.remove(key);
+                    hiddenFields.add(key);
+                } else if (wireFieldsMaskedByOpa.contains(key)) {
+                    if (!opaProjected.maskedUiPayload().containsKey(key)) {
+                        uiRecord.remove(key);
+                        hiddenFields.add(key);
+                    } else {
+                        Object opaUiValue = opaProjected.maskedUiPayload().get(key);
+                        if (!Objects.equals(opaUiValue, uiRecord.get(key))) {
+                            uiRecord.put(key, opaUiValue);
+                        }
+                    }
+                }
+            }
+
+            for (String key : new ArrayList<>(modelSafeRecord.keySet())) {
+                if (!opaProjected.maskedModelPayload().containsKey(key)) {
                     modelSafeRecord.remove(key);
                     maskedForAiFields.add(key);
                 } else {
-                    Object opaValue = opaProjected.detachedPayload().get(key);
+                    Object opaValue = opaProjected.maskedModelPayload().get(key);
                     Object existingValue = modelSafeRecord.get(key);
-                    if (!Objects.equals(opaValue, existingValue) && opaValue != null) {
+                    if (!Objects.equals(opaValue, existingValue)) {
                         modelSafeRecord.put(key, opaValue);
                         maskedForAiFields.add(key);
                     }
@@ -234,19 +303,170 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
         }
         if (mappedKey != null) {
             return decisionPointRegistry.findRegisteredPoint(mappedKey)
-                    .map(RuntimeDecisionPointRegistry.RegisteredDecisionPointContext::decisionPoint)
+                    .map(RegisteredDecisionPointContext::decisionPoint)
                     .filter(dp -> dp.evaluationModes().contains(EvaluationMode.TARGET));
         }
+
+        List<DecisionPointDescriptor> candidates = new ArrayList<>();
         for (DecisionPointDescriptor descriptor : decisionPointRegistry.getDecisionPointsByKey().values()) {
-            if (!descriptor.evaluationModes().contains(EvaluationMode.TARGET)) {
-                continue;
+            if (descriptor.evaluationModes().contains(EvaluationMode.TARGET)) {
+                candidates.add(descriptor);
             }
+        }
+
+        DecisionPointDescriptor nonPrimaryExact = null;
+        for (DecisionPointDescriptor descriptor : candidates) {
             if (normalizePath(descriptor.canonicalPath()).equals(normalizedTarget)
                     || normalizePath(descriptor.identity().resourceKey()).equals(normalizedTarget)) {
+                if (isPrimaryResourceOperation(descriptor)) {
+                    return Optional.of(descriptor);
+                }
+                if (nonPrimaryExact == null) {
+                    nonPrimaryExact = descriptor;
+                }
+            }
+        }
+        if (nonPrimaryExact != null) {
+            return Optional.of(nonPrimaryExact);
+        }
+
+        for (DecisionPointDescriptor descriptor : candidates) {
+            if (!isPrimaryResourceOperation(descriptor)) {
+                continue;
+            }
+            String basePath = stripTrailingFilter(normalizePath(descriptor.canonicalPath()));
+            if (basePath.equals(normalizedTarget)) {
+                return Optional.of(descriptor);
+            }
+        }
+
+        String strippedTarget = stripLeadingApi(normalizedTarget);
+        for (DecisionPointDescriptor descriptor : candidates) {
+            if (!isPrimaryResourceOperation(descriptor)) {
+                continue;
+            }
+            String strippedBase = stripLeadingApi(stripTrailingFilter(normalizePath(descriptor.canonicalPath())));
+            if (!strippedTarget.isEmpty() && strippedBase.equals(strippedTarget)) {
                 return Optional.of(descriptor);
             }
         }
         return Optional.empty();
+    }
+
+    private static boolean isPrimaryResourceOperation(DecisionPointDescriptor descriptor) {
+        if (descriptor.identity().pointKind() != DecisionPointKind.RESOURCE_OPERATION) {
+            return false;
+        }
+        String opKey = descriptor.identity().operationOrActionKey();
+        return opKey == null || !opKey.startsWith("surface-");
+    }
+
+    private static String stripTrailingFilter(String normalizedPath) {
+        if (normalizedPath.endsWith("/filter")) {
+            return normalizedPath.substring(0, normalizedPath.length() - "/filter".length());
+        }
+        return normalizedPath;
+    }
+
+    private static String stripLeadingApi(String normalizedPath) {
+        if ("/api".equals(normalizedPath)) {
+            return "";
+        }
+        if (normalizedPath.startsWith("/api/")) {
+            return normalizedPath.substring("/api".length());
+        }
+        return normalizedPath;
+    }
+
+    private static void extractResourceTargetFacts(
+            Map<String, Object> rawRecord,
+            FactContract factContract,
+            Map<String, String> attributeToWire,
+            Map<String, Object> trustedFacts,
+            Map<String, FactResolutionStatus> trustedStatuses
+    ) {
+        for (FactDescriptor fd : factContract.descriptorsByPath().values()) {
+            String factPath = fd.factPath();
+            if (factPath == null || !factPath.startsWith("resource.")) {
+                continue;
+            }
+            String directKey = factPath.substring("resource.".length());
+            String wireKey = rawRecord.containsKey(directKey)
+                    ? directKey
+                    : (fd.attributeId() != null ? attributeToWire.get(fd.attributeId()) : null);
+            if (wireKey == null || !rawRecord.containsKey(wireKey)) {
+                continue;
+            }
+            Object rawValue = rawRecord.get(wireKey);
+            if (rawValue == null) {
+                trustedStatuses.putIfAbsent(factPath, FactResolutionStatus.NULL);
+                continue;
+            }
+            Object coerced = coerceTargetFactValue(rawValue, fd.valueType());
+            if (coerced != null) {
+                trustedFacts.putIfAbsent(factPath, coerced);
+                trustedStatuses.putIfAbsent(factPath, FactResolutionStatus.PRESENT);
+            }
+        }
+    }
+
+    private static Object coerceTargetFactValue(Object rawValue, FactValueType valueType) {
+        if (rawValue == null || valueType == null) {
+            return rawValue;
+        }
+        return switch (valueType) {
+            case INT64 -> {
+                if (rawValue instanceof Number n) {
+                    yield n.longValue();
+                }
+                if (rawValue instanceof String s && !s.isBlank()) {
+                    try {
+                        yield Long.parseLong(s.trim());
+                    } catch (NumberFormatException ignored) {
+                        yield rawValue;
+                    }
+                }
+                yield rawValue;
+            }
+            case DECIMAL -> {
+                if (rawValue instanceof BigDecimal bd) {
+                    yield bd;
+                }
+                if (rawValue instanceof Number n) {
+                    yield new BigDecimal(n.toString());
+                }
+                if (rawValue instanceof String s && !s.isBlank()) {
+                    try {
+                        yield new BigDecimal(s.trim());
+                    } catch (NumberFormatException ignored) {
+                        yield rawValue;
+                    }
+                }
+                yield rawValue;
+            }
+            case BOOLEAN -> {
+                if (rawValue instanceof Boolean b) {
+                    yield b;
+                }
+                if (rawValue instanceof String s) {
+                    if ("true".equalsIgnoreCase(s.trim())) {
+                        yield Boolean.TRUE;
+                    }
+                    if ("false".equalsIgnoreCase(s.trim())) {
+                        yield Boolean.FALSE;
+                    }
+                }
+                yield rawValue;
+            }
+            case STRING, ENUM -> {
+                if (rawValue instanceof CharSequence || rawValue instanceof Enum<?>
+                        || rawValue instanceof Number || rawValue instanceof Boolean) {
+                    yield String.valueOf(rawValue);
+                }
+                yield rawValue;
+            }
+            default -> rawValue;
+        };
     }
 
     private static String normalizePath(String path) {

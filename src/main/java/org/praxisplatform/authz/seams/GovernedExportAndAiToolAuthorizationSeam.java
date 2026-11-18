@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -70,6 +71,39 @@ public final class GovernedExportAndAiToolAuthorizationSeam {
             allowedWireColumns = allowedWireColumns == null ? List.of() : List.copyOf(allowedWireColumns);
             suppressedAiAttributeIds = suppressedAiAttributeIds == null ? Set.of() : Set.copyOf(suppressedAiAttributeIds);
             detachedPayload = detachedPayload == null ? Map.of() : Map.copyOf(detachedPayload);
+        }
+    }
+
+    /** Dual-projected OPA evaluation result for the Operational Agent ({@code DualProjectedPayload}). */
+    public record OperationalAgentOpaProjection(
+            String decisionPointKey,
+            String runtimeRevision,
+            String policySetDigest,
+            Set<String> dynamicValueDeniedAttributeIds,
+            Set<String> aiDeniedAttributeIds,
+            List<MaskDirective> activeMaskDirectives,
+            Map<String, Object> maskedUiPayload,
+            Map<String, Object> maskedModelPayload
+    ) {
+        public OperationalAgentOpaProjection {
+            Objects.requireNonNull(decisionPointKey, "decisionPointKey is required");
+            Objects.requireNonNull(runtimeRevision, "runtimeRevision is required");
+            Objects.requireNonNull(policySetDigest, "policySetDigest is required");
+            dynamicValueDeniedAttributeIds = dynamicValueDeniedAttributeIds == null
+                    ? Set.of()
+                    : Set.copyOf(dynamicValueDeniedAttributeIds);
+            aiDeniedAttributeIds = aiDeniedAttributeIds == null
+                    ? Set.of()
+                    : Set.copyOf(aiDeniedAttributeIds);
+            activeMaskDirectives = activeMaskDirectives == null
+                    ? List.of()
+                    : List.copyOf(activeMaskDirectives);
+            maskedUiPayload = maskedUiPayload == null
+                    ? Map.of()
+                    : Collections.unmodifiableMap(new LinkedHashMap<>(maskedUiPayload));
+            maskedModelPayload = maskedModelPayload == null
+                    ? Map.of()
+                    : Collections.unmodifiableMap(new LinkedHashMap<>(maskedModelPayload));
         }
     }
 
@@ -366,6 +400,136 @@ public final class GovernedExportAndAiToolAuthorizationSeam {
     }
 
     /**
+     * Authorizes and projects separate UI and model-safe detached payloads for Operational Agent
+     * turns under live OPA {@code TARGET} evaluation, respecting read-only Spring transactions for
+     * outbox barriers and preserving operational fields alongside dynamic {@code MaskDirective}s.
+     */
+    public OperationalAgentOpaProjection projectOperationalAgentRecord(
+            String decisionPointKey,
+            String tenantId,
+            String environment,
+            Map<String, Object> baseUiRecord,
+            Map<String, Object> baseModelSafeRecord,
+            Collection<DtoFieldSchemaMetadata> fieldSchemas,
+            Map<String, Object> trustedTargetFacts,
+            Map<String, FactResolutionStatus> trustedFactStatuses
+    ) {
+        RegisteredDecisionPointContext registered = registry.requireRegisteredPoint(decisionPointKey);
+        DecisionPointDescriptor dp = registered.decisionPoint();
+        if (!dp.evaluationModes().contains(EvaluationMode.TARGET)) {
+            throw new SecurityException("AUTHZ_EVALUATION_MODE_NOT_ADMITTED: Decision point '"
+                    + decisionPointKey + "' does not admit EvaluationMode.TARGET for AI tool projection (P11/P62)");
+        }
+        Objects.requireNonNull(baseUiRecord, "baseUiRecord is required");
+        Objects.requireNonNull(baseModelSafeRecord, "baseModelSafeRecord is required");
+        Objects.requireNonNull(fieldSchemas, "fieldSchemas is required");
+
+        Map<String, FactResolutionStatus> statuses = buildFactStatuses(trustedTargetFacts, trustedFactStatuses);
+        ProviderInputProjection input = new ProviderInputProjection(
+                ProviderInputProjection.SCHEMA_VERSION_V1,
+                decisionPointKey,
+                "TARGET",
+                registered.factContract().factContractDigest(),
+                new TemporalContext(Instant.now(), ZoneOffset.UTC),
+                trustedTargetFacts,
+                statuses,
+                Set.of()
+        );
+
+        ProviderEvaluationEnvelope envelope = providerPort.evaluateTarget(input, null);
+        telemetryPublisher.recordEnvelope(
+                tenantId,
+                environment,
+                registered.enforcementBinding().pointAuthorityMode(),
+                envelope
+        );
+        boolean activeWritableTx = isActiveWritableTransaction();
+        if (envelope.gateOutcome() != GateOutcome.ALLOW) {
+            fulfillDenyObligations(decisionPointKey, envelope, activeWritableTx);
+            throw new SecurityException("AUTHZ_AI_TOOL_SEAM_DENIED: AI tool invocation denied with "
+                    + envelope.gateOutcome() + " on '" + decisionPointKey + "' (P11/P62)");
+        }
+
+        Map<String, Object> barrierContext = Map.of("policySetDigest", envelope.policySetDigest());
+        enforceBarrier(
+                decisionPointKey,
+                envelope.runtimeRevision(),
+                EnforcementDisposition.PERMIT,
+                ObligationFulfillmentBarrier.BEFORE_EXECUTION,
+                envelope.combinedObligationDirectives(),
+                barrierContext
+        );
+
+        Set<String> dynamicValueDenied = fieldUseQueryGuard.extractValueDeniedAttributeIds(
+                envelope.combinedFieldUseEffects());
+        Set<String> explicitAiDenied = resolveExplicitAiDeniedAttributes(
+                registered.admissionRecord().fieldLineageEntries());
+        Set<String> combinedModelDenied = new LinkedHashSet<>(dynamicValueDenied);
+        combinedModelDenied.addAll(explicitAiDenied);
+
+        List<MaskDirective> activeMasks = envelope.combinedMaskDirectives();
+        DetachedDtoMaskingResult uiMasked = maskingProcessor.projectAndMask(
+                baseUiRecord,
+                fieldSchemas,
+                dynamicValueDenied,
+                activeMasks
+        );
+        DetachedDtoMaskingResult modelMasked = maskingProcessor.projectAndMask(
+                baseModelSafeRecord,
+                fieldSchemas,
+                combinedModelDenied,
+                activeMasks
+        );
+
+        if (activeWritableTx) {
+            enforceBarrier(
+                    decisionPointKey,
+                    envelope.runtimeRevision(),
+                    EnforcementDisposition.PERMIT,
+                    ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
+                    envelope.combinedObligationDirectives(),
+                    barrierContext
+            );
+        }
+        enforceBarrier(
+                decisionPointKey,
+                envelope.runtimeRevision(),
+                EnforcementDisposition.PERMIT,
+                ObligationFulfillmentBarrier.BEFORE_DISCLOSURE,
+                envelope.combinedObligationDirectives(),
+                barrierContext
+        );
+
+        Map<String, Object> cleanUiPayload = new LinkedHashMap<>();
+        Map<String, Object> cleanModelPayload = new LinkedHashMap<>();
+        for (DtoFieldSchemaMetadata schema : fieldSchemas) {
+            if (!dynamicValueDenied.contains(schema.attributeId())) {
+                OptionalValue extractedUi = extractNestedValue(uiMasked.detachedProjection(), schema.wireFieldName());
+                if (extractedUi.present()) {
+                    cleanUiPayload.put(schema.wireFieldName(), extractedUi.value());
+                }
+            }
+            if (!combinedModelDenied.contains(schema.attributeId())) {
+                OptionalValue extractedModel = extractNestedValue(modelMasked.detachedProjection(), schema.wireFieldName());
+                if (extractedModel.present()) {
+                    cleanModelPayload.put(schema.wireFieldName(), extractedModel.value());
+                }
+            }
+        }
+
+        return new OperationalAgentOpaProjection(
+                decisionPointKey,
+                envelope.runtimeRevision(),
+                envelope.policySetDigest(),
+                dynamicValueDenied,
+                explicitAiDenied,
+                activeMasks,
+                cleanUiPayload,
+                cleanModelPayload
+        );
+    }
+
+    /**
      * Authorizes metadata-only governance classification inspection for AI policy authoring without
      * exposing any runtime attribute values or widening {@code aiUsageMode} ({@code P35}, {@code P43}, {@code P62}).
      */
@@ -405,6 +569,14 @@ public final class GovernedExportAndAiToolAuthorizationSeam {
     }
 
     private void fulfillDenyObligations(String decisionPointKey, ProviderEvaluationEnvelope envelope) {
+        fulfillDenyObligations(decisionPointKey, envelope, true);
+    }
+
+    private void fulfillDenyObligations(
+            String decisionPointKey,
+            ProviderEvaluationEnvelope envelope,
+            boolean includeOutboxBarrier
+    ) {
         List<ObligationDirective> obligations = envelope.combinedObligationDirectives();
         if (obligations == null || obligations.isEmpty()) {
             return;
@@ -418,14 +590,16 @@ public final class GovernedExportAndAiToolAuthorizationSeam {
                 obligations,
                 ctx
         );
-        enforceBarrier(
-                decisionPointKey,
-                envelope.runtimeRevision(),
-                EnforcementDisposition.DENY,
-                ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
-                obligations,
-                ctx
-        );
+        if (includeOutboxBarrier) {
+            enforceBarrier(
+                    decisionPointKey,
+                    envelope.runtimeRevision(),
+                    EnforcementDisposition.DENY,
+                    ObligationFulfillmentBarrier.BEFORE_COMMIT_OUTBOX,
+                    obligations,
+                    ctx
+            );
+        }
         enforceBarrier(
                 decisionPointKey,
                 envelope.runtimeRevision(),
@@ -434,6 +608,15 @@ public final class GovernedExportAndAiToolAuthorizationSeam {
                 obligations,
                 ctx
         );
+    }
+
+    private static boolean isActiveWritableTransaction() {
+        try {
+            return org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()
+                    && !org.springframework.transaction.support.TransactionSynchronizationManager.isCurrentTransactionReadOnly();
+        } catch (NoClassDefFoundError ignored) {
+            return false;
+        }
     }
 
     private void enforceBarrier(
@@ -498,6 +681,56 @@ public final class GovernedExportAndAiToolAuthorizationSeam {
             }
         }
         return forbidden;
+    }
+
+    private static Set<String> resolveExplicitAiDeniedAttributes(List<FieldLineageCatalogEntry> entries) {
+        if (entries == null || entries.isEmpty()) {
+            return Set.of();
+        }
+        Map<String, List<FieldLineageCatalogEntry>> byAttr = new LinkedHashMap<>();
+        for (FieldLineageCatalogEntry entry : entries) {
+            byAttr.computeIfAbsent(entry.attributeId(), k -> new ArrayList<>()).add(entry);
+        }
+        Set<String> denied = new LinkedHashSet<>();
+        for (FieldLineageCatalogEntry entry : entries) {
+            if (isExplicitAiDeniedOnEntry(entry)
+                    || hasExplicitAiDeniedAncestor(entry, byAttr, new LinkedHashSet<>())) {
+                denied.add(entry.attributeId());
+            }
+        }
+        return denied;
+    }
+
+    private static boolean isExplicitAiDeniedOnEntry(FieldLineageCatalogEntry entry) {
+        if (!entry.explicitGovernanceDeclared() || entry.aiUsageMode() == null) {
+            return false;
+        }
+        String mode = entry.aiUsageMode().trim().toUpperCase(Locale.ROOT);
+        return "DENIED".equals(mode) || "FORBIDDEN".equals(mode);
+    }
+
+    private static boolean hasExplicitAiDeniedAncestor(
+            FieldLineageCatalogEntry current,
+            Map<String, List<FieldLineageCatalogEntry>> byAttr,
+            Set<String> visited
+    ) {
+        if (!visited.add(current.attributeId())) {
+            return false;
+        }
+        for (String parentId : current.upstreamAttributeRefs()) {
+            List<FieldLineageCatalogEntry> parents = byAttr.get(parentId);
+            if (parents == null || parents.isEmpty()) {
+                // External cross-resource aliases absent from this DTO lineage do not fail closed here.
+                continue;
+            }
+            for (FieldLineageCatalogEntry parent : parents) {
+                if (isExplicitAiDeniedOnEntry(parent)
+                        || hasExplicitAiDeniedAncestor(parent, byAttr, visited)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isAiValueForbiddenOnEntry(FieldLineageCatalogEntry entry) {
