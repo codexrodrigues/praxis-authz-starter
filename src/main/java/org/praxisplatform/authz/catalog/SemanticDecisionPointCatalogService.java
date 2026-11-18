@@ -313,9 +313,12 @@ public final class SemanticDecisionPointCatalogService {
         boolean hasDefaultConcept = defaultConceptId.equals(candidate.conceptId());
         boolean sameRank = sensitivityRank(candidate.sensitivityClassification())
                 == sensitivityRank(canonical.sensitivityClassification());
-        boolean sameAiUsage = Objects.equals(candidate.aiUsageMode(), canonical.aiUsageMode());
+        int candidateAiRank = aiUsageRestrictivenessRank(candidate.aiUsageMode());
+        int canonicalAiRank = aiUsageRestrictivenessRank(canonical.aiUsageMode());
+        boolean compatibleAiUsage = Objects.equals(candidate.aiUsageMode(), canonical.aiUsageMode())
+                || (candidateAiRank > 0 && canonicalAiRank >= candidateAiRank);
         boolean sameExportable = candidate.exportable() == canonical.exportable();
-        if (hasDefaultConcept && sameRank && sameAiUsage && sameExportable) {
+        if (hasDefaultConcept && sameRank && compatibleAiUsage && sameExportable) {
             return new FieldLineageCatalogEntry(
                     candidate.attributeId(),
                     canonical.conceptId(),
@@ -323,7 +326,7 @@ public final class SemanticDecisionPointCatalogService {
                     candidate.wirePath(),
                     candidate.operationRole(),
                     canonical.sensitivityClassification(),
-                    candidate.aiUsageMode(),
+                    canonical.aiUsageMode(),
                     candidate.exportable(),
                     candidate.allowedUseCategories(),
                     candidate.upstreamAttributeRefs(),
@@ -331,6 +334,19 @@ public final class SemanticDecisionPointCatalogService {
             );
         }
         return candidate;
+    }
+
+    private static int aiUsageRestrictivenessRank(String aiUsageMode) {
+        if (aiUsageMode == null) {
+            return 0;
+        }
+        return switch (aiUsageMode.trim().toUpperCase(java.util.Locale.ROOT)) {
+            case "DENIED", "FORBIDDEN" -> 4;
+            case "SCHEMA_METADATA_ONLY", "METADATA_ONLY" -> 3;
+            case "MASKED_ONLY" -> 2;
+            case "ALLOWED", "VALUE_ALLOWED" -> 1;
+            default -> 0;
+        };
     }
 
     private static int sensitivityRank(String classification) {

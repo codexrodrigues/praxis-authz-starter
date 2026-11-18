@@ -811,11 +811,25 @@ public final class MetadataDtoGovernanceIntrospector {
         if (effectiveGovNode == null) {
             return "SCHEMA_METADATA_ONLY";
         }
-        String visibility = effectiveGovNode.path("aiUsage").path("visibility").asText("").toLowerCase(Locale.ROOT);
-        if ("deny".equals(visibility)) {
+        String visibility = effectiveGovNode.path("aiUsage").path("visibility").asText("")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+        if ("deny".equals(visibility) || "denied".equals(visibility)) {
             return "DENIED";
         }
-        if ("masked".equals(visibility)) {
+        if ("mask".equals(visibility) || "masked".equals(visibility) || "summarize_only".equals(visibility)) {
+            return "MASKED_ONLY";
+        }
+        if ("allow".equals(visibility) || "allowed".equals(visibility)) {
+            return "ALLOWED";
+        }
+        String sensitivity = mapSensitivityClassification(effectiveGovNode);
+        if ("SECRET".equals(sensitivity) || "SENSITIVE_PERSONAL".equals(sensitivity)) {
+            return "DENIED";
+        }
+        if ("PII_RESTRICTED".equals(sensitivity)
+                || "FINANCIAL_RESTRICTED".equals(sensitivity)
+                || "RESTRICTED".equals(sensitivity)) {
             return "MASKED_ONLY";
         }
         return "SCHEMA_METADATA_ONLY";

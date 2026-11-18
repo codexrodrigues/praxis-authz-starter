@@ -1,9 +1,11 @@
 package org.praxisplatform.authz.agent;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -187,7 +189,7 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
                     pointKey,
                     tenantId,
                     env,
-                    rawRecord,
+                    Collections.unmodifiableMap(modelSafeRecord),
                     fieldSchemas,
                     trustedFacts,
                     trustedStatuses);
@@ -220,7 +222,16 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
         if (decisionPointRegistry == null || resourcePath == null || resourcePath.isBlank()) {
             return Optional.empty();
         }
+        String normalizedTarget = normalizePath(resourcePath);
         String mappedKey = resourcePathToTargetPointKey.get(resourcePath);
+        if (mappedKey == null) {
+            for (Map.Entry<String, String> entry : resourcePathToTargetPointKey.entrySet()) {
+                if (entry.getKey() != null && normalizePath(entry.getKey()).equals(normalizedTarget)) {
+                    mappedKey = entry.getValue();
+                    break;
+                }
+            }
+        }
         if (mappedKey != null) {
             return decisionPointRegistry.findRegisteredPoint(mappedKey)
                     .map(RuntimeDecisionPointRegistry.RegisteredDecisionPointContext::decisionPoint)
@@ -230,12 +241,23 @@ public final class AuthzAgentAuthorizationBridge implements AgentAuthorizationBr
             if (!descriptor.evaluationModes().contains(EvaluationMode.TARGET)) {
                 continue;
             }
-            if (resourcePath.equals(descriptor.canonicalPath())
-                    || resourcePath.equals(descriptor.identity().resourceKey())) {
+            if (normalizePath(descriptor.canonicalPath()).equals(normalizedTarget)
+                    || normalizePath(descriptor.identity().resourceKey()).equals(normalizedTarget)) {
                 return Optional.of(descriptor);
             }
         }
         return Optional.empty();
+    }
+
+    private static String normalizePath(String path) {
+        if (path == null) {
+            return "";
+        }
+        String trimmed = path.trim();
+        while (trimmed.endsWith("/") && trimmed.length() > 1) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed.toLowerCase(Locale.ROOT);
     }
 
     private static List<DtoFieldSchemaMetadata> deriveAdHocSchemas(Map<String, Object> rawRecord) {

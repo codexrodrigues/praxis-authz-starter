@@ -50,7 +50,7 @@
         <spring-boot.repackage.skip>true</spring-boot.repackage.skip>
         <praxis-authz.version>0.1.0-beta.2</praxis-authz.version>
         <praxis-metadata.version>8.0.0-rc.195</praxis-metadata.version>
-        <praxis-config.version>0.1.0-rc.180</praxis-config.version>
+        <praxis-config.version>0.1.0-rc.181</praxis-config.version>
     </properties>
 
     <dependencies>

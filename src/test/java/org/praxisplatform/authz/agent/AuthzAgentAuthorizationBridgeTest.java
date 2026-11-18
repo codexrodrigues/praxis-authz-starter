@@ -65,6 +65,7 @@ import org.praxisplatform.uischema.annotation.AiVisibilityMode;
 import org.praxisplatform.uischema.annotation.ApiResource;
 import org.praxisplatform.uischema.annotation.DomainClassification;
 import org.praxisplatform.uischema.annotation.DomainGovernance;
+import org.praxisplatform.uischema.annotation.DomainGovernancePreset;
 import org.praxisplatform.uischema.annotation.WorkflowAction;
 import org.praxisplatform.uischema.capability.ResourceStateSnapshot;
 import org.praxisplatform.uischema.concurrency.ResourceRepresentationResult;
@@ -443,5 +444,116 @@ class AuthzAgentAuthorizationBridgeTest {
                     assertTrue(primary.canInvokeAction(adminCtx, resourcePath, "approve-restricted", 1L));
                     assertTrue(primary.canModifyFields(adminCtx, resourcePath, RestrictedActionInputDto.class, Set.of("approvalCode")));
                 });
+    }
+
+    public static class RedTeamPresetGovernedDto {
+        @UISchema(label = "ID")
+        public Long id;
+
+        @UISchema(label = "Nome")
+        @DomainGovernance(
+                classification = DomainClassification.INTERNAL,
+                aiUsage = @AiUsagePolicy(visibility = AiVisibilityMode.ALLOW))
+        public String fullName;
+
+        @UISchema(label = "CPF")
+        @DomainGovernance(preset = DomainGovernancePreset.LGPD_PERSONAL_ID)
+        public String personalTaxId;
+
+        @UISchema(label = "Diagnostico")
+        @DomainGovernance(preset = DomainGovernancePreset.LGPD_SENSITIVE_DATA)
+        public String sensitiveHealthCode;
+    }
+
+    @Test
+    void introspectorMapsAllowMaskDenyModesAndOpaSeamNeverUnmasksMetadataMaskedFields() {
+        MetadataDtoGovernanceIntrospector introspector = new MetadataDtoGovernanceIntrospector();
+        List<FieldLineageCatalogEntry> entries = introspector.deriveDtoFieldLineageCatalogEntries(
+                "hr.employees", RedTeamPresetGovernedDto.class, "READ_PROJECTION", null);
+
+        Map<String, String> modesByWire = new java.util.LinkedHashMap<>();
+        for (FieldLineageCatalogEntry entry : entries) {
+            modesByWire.put(entry.wirePath(), entry.aiUsageMode());
+        }
+        assertEquals("SCHEMA_METADATA_ONLY", modesByWire.get("id"));
+        assertEquals("ALLOWED", modesByWire.get("fullName"));
+        assertEquals("MASKED_ONLY", modesByWire.get("personalTaxId"));
+        assertEquals("DENIED", modesByWire.get("sensitiveHealthCode"));
+
+        WorkforceLeaveAuthzPilotBlueprint blueprint = WorkforceLeaveAuthzPilotBlueprint.createHostBlueprint(
+                "praxis-workforce-showcase", "hr.employees", "workforce.employees");
+        MethodBindingAdmissionRecord baseRecord = blueprint.admissionRecords().getFirst();
+        DecisionPointDescriptor descriptor = baseRecord.decisionPoint();
+        String registeredPointKey = descriptor.identity().pointKey();
+        String runtimeRev = blueprint.bundleArtifact().runtimeHead().runtimeRevision();
+        String policyDigest = blueprint.bundleArtifact().runtimeHead().policySetDigest();
+        String fcDigest = blueprint.factContract().factContractDigest();
+
+        // Simulate OPA policy admitting fullName and tax_id as ALLOWED without OPA-level MaskDirective;
+        // AuthzAgentAuthorizationBridge must pass metadataDelegate's already-masked modelSafeRecord so raw tax_id is never restored.
+        List<FieldLineageCatalogEntry> permissiveOpaLineage = List.of(
+                new FieldLineageCatalogEntry(
+                        "hr.employees.full_name", "concept:name", "schema://hr.employees/ResponseDTO",
+                        "fullName", "READ_PROJECTION", "INTERNAL", "ALLOWED", true,
+                        Set.of(FieldUseCategory.VALUE), List.of(), true),
+                new FieldLineageCatalogEntry(
+                        "hr.employees.personal_tax_id", "concept:taxId", "schema://hr.employees/ResponseDTO",
+                        "personalTaxId", "READ_PROJECTION", "PII_RESTRICTED", "ALLOWED", true,
+                        Set.of(FieldUseCategory.VALUE), List.of(), true));
+        MethodBindingAdmissionRecord admissionRecord = new MethodBindingAdmissionRecord(
+                baseRecord.serviceKey(), descriptor, baseRecord.enforcementBinding(),
+                Set.of(AdmittedInvocationChannel.PROXIED_INTERNAL_SERVICE), true, permissiveOpaLineage);
+        RuntimeDecisionPointRegistry registry = new RuntimeDecisionPointRegistry(
+                List.of(admissionRecord), blueprint.coordinates());
+
+        AuthorizationProviderPort permissiveOpa = new AuthorizationProviderPort() {
+            @Override
+            public ProviderEvaluationEnvelope evaluateTarget(
+                    ProviderInputProjection input, org.praxisplatform.authz.contracts.binding.WriteIntent writeIntent) {
+                return new ProviderEvaluationEnvelope(
+                        ProviderEvaluationEnvelope.SCHEMA_VERSION_V1,
+                        "opa", "eval-allow-all", registeredPointKey, EvaluationMode.TARGET,
+                        "first-deny", runtimeRev, policyDigest, fcDigest, GateOutcome.ALLOW,
+                        List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
+                        Instant.now(), 100L);
+            }
+
+            @Override
+            public SearchProviderEvaluationResult evaluateSearch(ProviderInputProjection input) {
+                throw new UnsupportedOperationException();
+            }
+        };
+
+        DetachedDtoMaskingProcessor maskingProcessor = new DetachedDtoMaskingProcessor();
+        GovernedExportAndAiToolAuthorizationSeam seam = new GovernedExportAndAiToolAuthorizationSeam(
+                registry, permissiveOpa, new FieldUseQueryGuard(), maskingProcessor,
+                new ObligationBarrierCoordinator(), new GovernedCollectionExportGuard(maskingProcessor),
+                new SanitizedAuthorizationTelemetryPublisher(List.of(), 10));
+
+        AuthzAgentAuthorizationBridge bridge = new AuthzAgentAuthorizationBridge(
+                new DefaultMetadataGovernanceAgentAuthorizationBridge(),
+                seam, registry, null, introspector, null,
+                Map.of(descriptor.canonicalPath(), registeredPointKey));
+
+        AgentExecutionContext execContext = new AgentExecutionContext(
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "tenant-a", "alice", "prod", "alice", Set.of("ROLE_USER"),
+                null, null, Map.of(), Map.of());
+
+        DualProjectedPayload projected = bridge.projectRecord(
+                execContext,
+                descriptor.canonicalPath() + "/",
+                RedTeamPresetGovernedDto.class,
+                Map.of(
+                        "id", 1L,
+                        "fullName", "Mariana Souza",
+                        "personalTaxId", "52998224725",
+                        "sensitiveHealthCode", "CID-Z99"));
+
+        assertEquals("52998224725", projected.uiRecord().get("personalTaxId"));
+        assertEquals("Mariana Souza", projected.modelSafeRecord().get("fullName"));
+        assertFalse(projected.modelSafeRecord().containsKey("sensitiveHealthCode"));
+        assertTrue(projected.modelSafeRecord().containsKey("personalTaxId"));
+        assertFalse(projected.modelSafeRecord().get("personalTaxId").toString().contains("52998224725"));
     }
 }
