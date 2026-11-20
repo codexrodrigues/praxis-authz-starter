@@ -2,11 +2,13 @@ package org.praxisplatform.authz.host.metadata;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import org.praxisplatform.authz.catalog.AdmittedInvocationChannel;
 import org.praxisplatform.authz.catalog.FieldLineageCatalogEntry;
@@ -24,6 +26,7 @@ import org.praxisplatform.authz.contracts.compatibility.ImpactGraphBaseline;
 import org.praxisplatform.authz.contracts.compatibility.RolloutActivationStrategy;
 import org.praxisplatform.authz.contracts.context.FactContract;
 import org.praxisplatform.authz.contracts.context.FactDescriptor;
+import org.praxisplatform.authz.contracts.context.FactSlotNamespace;
 import org.praxisplatform.authz.contracts.datascope.QueryableFieldDescriptor;
 import org.praxisplatform.authz.contracts.datascope.QueryableResourceProjection;
 import org.praxisplatform.authz.contracts.datascope.SearchPredicateOperator;
@@ -573,7 +576,8 @@ public final class AuthzHostPolicyBootstrapBuilder {
     /**
      * Synthesizes and registers a collection-and-target {@link AuthorizationPolicyDefinition} for an
      * {@code AUTHENTICATED_SHARED} bulk workflow action ({@code BulkMode.DOMAIN_COMMAND}), using a
-     * non-null predicate on the resource's primary queryable field for its shared {@code SEARCH} scope.
+     * non-null predicate on the configured fact path or a canonical queryable field for its shared
+     * {@code SEARCH} scope.
      */
     public AuthzHostPolicyBootstrapBuilder addSharedBulkActionPolicy(
             AuthzResourceGovernanceSpec<?> spec,
@@ -1879,52 +1883,31 @@ public final class AuthzHostPolicyBootstrapBuilder {
     private static List<FieldUseContributionSpec> defaultSearchFieldUse(
             AuthzResourceGovernanceSpec<?> spec
     ) {
-        if (spec.factContract() != null && spec.factContract().descriptorsByPath() != null) {
-            for (FactDescriptor descriptor : spec.factContract().descriptorsByPath().values()) {
-                if (descriptor != null
-                        && descriptor.factPath().startsWith("resource.")
-                        && descriptor.attributeId() != null
-                        && !descriptor.attributeId().isBlank()
-                        && !"RESTRICTED".equalsIgnoreCase(descriptor.classification())
-                        && !"SECRET".equalsIgnoreCase(descriptor.dataCategory())
-                        && !"CREDENTIAL".equalsIgnoreCase(descriptor.dataCategory())) {
-                    return List.of(new FieldUseContributionSpec(
-                            PolicyFieldSelector.exact(Set.of(descriptor.attributeId())),
-                            Set.of(FieldUseCategory.VALUE),
-                            RuleEffect.ALLOW
-                    ));
-                }
-            }
-            for (FactDescriptor descriptor : spec.factContract().descriptorsByPath().values()) {
-                if (descriptor != null
-                        && descriptor.factPath().startsWith("resource.")
-                        && descriptor.attributeId() != null
-                        && !descriptor.attributeId().isBlank()) {
-                    return List.of(new FieldUseContributionSpec(
-                            PolicyFieldSelector.exact(Set.of(descriptor.attributeId())),
-                            Set.of(FieldUseCategory.VALUE),
-                            RuleEffect.ALLOW
-                    ));
-                }
-            }
-        }
-        if (spec.queryProjection() != null && spec.queryProjection().fieldsByPath() != null) {
-            for (QueryableFieldDescriptor descriptor : spec.queryProjection().fieldsByPath().values()) {
-                if (descriptor != null
-                        && descriptor.attributeId() != null
-                        && !descriptor.attributeId().isBlank()) {
-                    return List.of(new FieldUseContributionSpec(
-                            PolicyFieldSelector.exact(Set.of(descriptor.attributeId())),
-                            Set.of(FieldUseCategory.VALUE),
-                            RuleEffect.ALLOW
-                    ));
-                }
-            }
-        }
-        throw new IllegalStateException(
-                "Unable to locate canonical resource attributeId for SEARCH fieldUse contribution on "
-                        + spec.resourceKey()
-        );
+        String attributeId = Optional.ofNullable(spec.factContract())
+                .flatMap(contract -> contract.descriptorsByPath().values().stream()
+                        .filter(fact -> fact.namespace() == FactSlotNamespace.RESOURCE && fact.attributeId() != null)
+                        .min(Comparator.comparing(AuthzHostPolicyBootstrapBuilder::isRestrictedSearchFieldUse)
+                                .thenComparing(FactDescriptor::factPath))
+                        .map(FactDescriptor::attributeId))
+                .or(() -> Optional.ofNullable(spec.queryProjection())
+                        .flatMap(projection -> projection.fieldsByPath().values().stream()
+                                .min(Comparator.comparing(QueryableFieldDescriptor::fieldPath))
+                                .map(QueryableFieldDescriptor::attributeId)))
+                .orElseThrow(() -> new IllegalStateException(
+                        "Unable to locate canonical resource attributeId for SEARCH fieldUse contribution on "
+                                + spec.resourceKey()
+                ));
+        return List.of(new FieldUseContributionSpec(
+                PolicyFieldSelector.exact(Set.of(attributeId)),
+                Set.of(FieldUseCategory.VALUE),
+                RuleEffect.ALLOW
+        ));
+    }
+
+    private static boolean isRestrictedSearchFieldUse(FactDescriptor fact) {
+        return "RESTRICTED".equalsIgnoreCase(fact.classification())
+                || "SECRET".equalsIgnoreCase(fact.dataCategory())
+                || "CREDENTIAL".equalsIgnoreCase(fact.dataCategory());
     }
 
     private static String resolvePrimaryQueryableFieldPath(AuthzResourceGovernanceSpec<?> spec) {
@@ -1934,16 +1917,14 @@ public final class AuthzHostPolicyBootstrapBuilder {
                 && !tenantSpec.sharedBulkNonNullFactPath().isBlank()) {
             return tenantSpec.sharedBulkNonNullFactPath().trim();
         }
-        if (spec.queryProjection() != null && spec.queryProjection().fieldsByPath() != null
-                && !spec.queryProjection().fieldsByPath().isEmpty()) {
-            Map<String, QueryableFieldDescriptor> fieldsByPath = spec.queryProjection().fieldsByPath();
-            for (QueryableFieldDescriptor qfd : fieldsByPath.values()) {
-                if (qfd != null && qfd.supportedOperators() != null
-                        && qfd.supportedOperators().contains(SearchPredicateOperator.IS_NOT_NULL)) {
-                    return qfd.fieldPath();
-                }
-            }
-            return fieldsByPath.keySet().iterator().next();
+        if (spec.queryProjection() != null) {
+            return spec.queryProjection().fieldsByPath().values().stream()
+                    .min(Comparator
+                            .comparing((QueryableFieldDescriptor field) ->
+                                    !field.supportedOperators().contains(SearchPredicateOperator.IS_NOT_NULL))
+                            .thenComparing(QueryableFieldDescriptor::fieldPath))
+                    .orElseThrow()
+                    .fieldPath();
         }
         throw new IllegalStateException(
                 "Unable to locate primary queryable field path for AUTHENTICATED_SHARED dataScope on "

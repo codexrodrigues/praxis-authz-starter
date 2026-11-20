@@ -108,7 +108,7 @@ public class PraxisAuthzProperties {
 
     /** OPA client and revision-guard configuration. */
     public static class Opa {
-        /** Whether to auto-configure the production HttpClientOpaTransport bean (false by default so missing transport fails closed per P20). */
+        /** Selects HttpClientOpaTransport over the local bootstrap transport when the host has no OpaClientTransport bean. */
         private boolean httpTransportEnabled = false;
 
         /** Base URL of the primary OPA instance when HTTP transport is used. */

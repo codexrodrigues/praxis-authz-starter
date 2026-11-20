@@ -13,7 +13,7 @@
 
     <groupId>io.github.codexrodrigues</groupId>
     <artifactId>praxis-authz-starter</artifactId>
-    <version>0.1.0-beta.10</version>
+    <version>0.1.0-beta.11-ergon.20261120.1</version>
     <packaging>jar</packaging>
 
     <name>Praxis Authz Spring Boot Starter</name>
@@ -44,13 +44,15 @@
     </scm>
 
     <properties>
+        <project.build.outputTimestamp>2026-11-20T01:00:00Z</project.build.outputTimestamp>
         <java.version>21</java.version>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-boot.repackage.skip>true</spring-boot.repackage.skip>
         <praxis-authz.version>0.1.0-beta.2</praxis-authz.version>
+        <praxis-authz-opa.version>0.1.0-beta.3-ergon.20261120.1</praxis-authz-opa.version>
         <praxis-metadata.version>8.0.0-rc.195</praxis-metadata.version>
-        <praxis-config.version>0.1.0-rc.181</praxis-config.version>
+        <praxis-config.version>0.1.0-rc.185-ergon.20261120.1</praxis-config.version>
     </properties>
 
     <dependencies>
@@ -67,7 +69,7 @@
         <dependency>
             <groupId>io.github.codexrodrigues</groupId>
             <artifactId>praxis-authz-opa</artifactId>
-            <version>${praxis-authz.version}</version>
+            <version>${praxis-authz-opa.version}</version>
         </dependency>
 
         <dependency>
@@ -94,6 +96,11 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-jpa</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-core</artifactId>
             <optional>true</optional>
         </dependency>
         <dependency>

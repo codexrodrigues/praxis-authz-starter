@@ -650,6 +650,27 @@ public final class AuthzGovernedResourceServiceSupport {
         }
     }
 
+    <T> T withQueryFrame(Object owner, Runnable initialize, Supplier<T> action) {
+        AuthorizationFrame top = frameStack.get().peekFirst();
+        if (top instanceof QueryFrame query && query.owner() == owner) {
+            return action.get();
+        }
+        Supplier<T> initializeAndRun = () -> {
+            initialize.run();
+            return action.get();
+        };
+        if (top == null && TransactionSynchronizationManager.isSynchronizationActive()) {
+            // Reuse the scope across pre-lock and post-lock checks until transaction cleanup.
+            return initializeAndRun.get();
+        }
+        // A one-off check must release its frames and restore an enclosing operation, even on failure.
+        return executeInReentrancyScope(initializeAndRun);
+    }
+
+    boolean ownsCurrentMutationFrame(Object owner) {
+        return frameStack.get().peekFirst() instanceof MutationFrame mutation && mutation.owner() == owner;
+    }
+
     /** Returns the active per-request OPA {@link MaskDirective}s for collection export, or an empty list. */
     public List<MaskDirective> currentExportMaskDirectives() {
         QueryFrame queryFrame = currentQueryFrame();

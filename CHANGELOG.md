@@ -4,6 +4,12 @@ Todas as mudanças relevantes de `praxis-authz-starter` são documentadas neste 
 
 O formato segue o padrão [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Corrigido
+- Seleção do transporte OPA HTTP quando habilitado em hosts com bundle de bootstrap.
+- Ordenação canônica dos caminhos nos digests de projeções e fatos e na seleção dos atributos no bootstrap.
+
 ## [0.1.0-beta.1] - 2026-11-15
 
 ### Adicionado

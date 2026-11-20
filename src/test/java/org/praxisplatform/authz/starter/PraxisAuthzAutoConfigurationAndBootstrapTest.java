@@ -3,12 +3,16 @@ package org.praxisplatform.authz.starter;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.praxisplatform.authz.autoconfigure.PraxisAuthzAutoConfiguration;
 import org.praxisplatform.authz.autoconfigure.PraxisAuthzBootstrapException;
 import org.praxisplatform.authz.catalog.MethodBindingAdmissionRecord;
@@ -23,6 +27,8 @@ import org.praxisplatform.authz.contracts.context.ProviderInputProjection;
 import org.praxisplatform.authz.contracts.envelope.ProviderEvaluationEnvelope;
 import org.praxisplatform.authz.enforcement.pipeline.AuthorizationProviderPort;
 import org.praxisplatform.authz.enforcement.pipeline.EnforcementPipelineExecutor;
+import org.praxisplatform.authz.host.metadata.AuthzHostPolicyBootstrapBuilder.AuthzHostPolicyBootstrapBundle;
+import org.praxisplatform.authz.opa.client.HttpClientOpaTransport;
 import org.praxisplatform.authz.opa.client.OpaClientTransport;
 import org.praxisplatform.authz.pilot.WorkforceLeaveAuthzPilotBlueprint;
 import org.springframework.boot.actuate.health.Status;
@@ -201,6 +207,49 @@ class PraxisAuthzAutoConfigurationAndBootstrapTest {
                     List<String> diagnostics = ((PraxisAuthzBootstrapException) root).diagnostics();
                     assertTrue(diagnostics.contains("COMPAT_UNREGISTERED_HOST_MASK_STRATEGY:PHANTOM_UNREGISTERED_STRATEGY"));
                 });
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(booleans = {false, true})
+    void bootstrapBundleUsesHttpOnlyWhenEnabledAndAnExplicitHostTransportTakesPrecedence(Boolean httpEnabled) {
+        var blueprint = WorkforceLeaveAuthzPilotBlueprint.createWorkforceLeaveBlueprint();
+        var bundle = new AuthzHostPolicyBootstrapBundle(
+                blueprint.serviceKey(),
+                blueprint.coordinates(),
+                blueprint.admissionRecords(),
+                blueprint.bundleArtifact(),
+                blueprint.localOpaTransport(),
+                List.of(blueprint.policyDefinition())
+        );
+        var runner = contextRunner.withBean(AuthzHostPolicyBootstrapBundle.class, () -> bundle);
+        if (httpEnabled != null) {
+            runner = runner.withPropertyValues("praxis.authz.opa.http-transport-enabled=" + httpEnabled);
+        }
+
+        runner.run(context -> {
+            assertEquals(1, context.getBeansOfType(OpaClientTransport.class).size());
+            OpaClientTransport selected = context.getBean(OpaClientTransport.class);
+            if (Boolean.TRUE.equals(httpEnabled)) {
+                assertTrue(selected instanceof HttpClientOpaTransport);
+                assertFalse(context.containsBean("bootstrapBundleLocalOpaTransport"));
+            } else {
+                assertSame(bundle.localOpaTransport(), selected);
+                assertFalse(context.containsBean("httpClientOpaTransport"));
+            }
+            assertNotNull(context.getBean(AuthorizationProviderPort.class));
+            assertSame(bundle.coordinates(), context.getBean(HostRuntimePolicyCoordinates.class));
+        });
+
+        OpaClientTransport hostTransport = WorkforceLeaveAuthzPilotBlueprint
+                .createWorkforceLeaveBlueprint().localOpaTransport();
+        runner.withBean(OpaClientTransport.class, () -> hostTransport).run(context -> {
+            assertEquals(1, context.getBeansOfType(OpaClientTransport.class).size());
+            assertSame(hostTransport, context.getBean(OpaClientTransport.class));
+            assertFalse(context.containsBean("httpClientOpaTransport"));
+            assertFalse(context.containsBean("bootstrapBundleLocalOpaTransport"));
+            assertNotNull(context.getBean(AuthorizationProviderPort.class));
+        });
     }
 
     private static Throwable findBootstrapCause(Throwable throwable) {

@@ -218,6 +218,16 @@ praxis:
       search-max-same-instance-retries: 1
 ```
 
+Com `http-transport-enabled: true`, o Starter seleciona o transporte HTTP mesmo quando o contexto tem um
+`AuthzHostPolicyBootstrapBundle`. Com a propriedade em `false` ou ausente, o bundle fornece o transporte local
+quando estiver presente. Um bean `OpaClientTransport` declarado pelo host tem precedência em ambos os modos.
+No modo HTTP, o ID de `praxis.authz.opa.instance-id` deve ser o mesmo que o processo OPA declara em
+`PRAXIS_OPA_INSTANCE_ID`.
+
+Para ações em lote de recursos `AUTHENTICATED_SHARED`, `sharedBulkNonNullFactPath` fixa o campo usado no predicado
+`IS_NOT_NULL`. Sem essa configuração, o bootstrap prioriza campos queryable que suportam o operador e desempata
+pelo caminho canônico em ordem lexicográfica.
+
 ---
 
 ## Mapa de Pacotes e Componentes
@@ -245,9 +255,9 @@ praxis:
 | `praxis.authz.fail-closed-on-bootstrap-error` | `true` | Aborta a inicialização imediatamente se houver falha de provedor único ou compatibilidade |
 | `praxis.authz.require-bindings-on-startup` | `true` | Exige bindings de pontos de decisão em runtime durante a verificação de startup |
 | `praxis.authz.masking-hmac-secret` | `praxis-default-hmac-key-2026` | Chave HMAC usada no mascaramento `HASH_TOKEN_KEYED` (não vazia; **sobrescreva em produção**) |
-| `praxis.authz.opa.http-transport-enabled` | `false` | Ativa a auto-configuração do `HttpClientOpaTransport` apontando para OPA via HTTP |
+| `praxis.authz.opa.http-transport-enabled` | `false` | Seleciona o transporte HTTP no lugar do transporte inferido do bundle quando o host não declara seu próprio `OpaClientTransport` |
 | `praxis.authz.opa.base-url` | `http://127.0.0.1:8181` | URL base HTTP para consultas REST de dados ao OPA |
-| `praxis.authz.opa.instance-id` | `opa-primary-1` | Identificador lógico padrão da instância OPA (`X-OPA-Instance-Id`) |
+| `praxis.authz.opa.instance-id` | `opa-primary-1` | Identificador da instância OPA atendida pelo endereço configurado |
 | `praxis.authz.opa.request-timeout` | `1500ms` | Timeout máximo por consulta HTTP ao OPA |
 | `praxis.authz.opa.search-max-same-instance-retries` | `1` | Máximo de retentativas na mesma instância em rotação benigna de bundle durante `SEARCH` (`0..3`) |
 | `praxis.authz.compatibility.verify-on-startup` | `true` | Executa `HostPolicyCompatibilityStartupVerifier` na inicialização |
@@ -268,6 +278,76 @@ praxis:
 | `praxis.authz.readiness-gate.fail-on-warning` | `false` | Promove achados `Severity.WARNING` do gate de prontidão para falhas de inicialização |
 
 ---
+
+## Catálogo PAP para autoria ACCESS
+
+`GET /api/praxis/config/domain-rules/authorization/catalog` retorna os serviços
+delegados na sessão. Para habilitar a rota no host servlet, ative
+`praxis.authz.admin-endpoints.enabled`, registre um
+`org.praxisplatform.authz.catalog.PapCatalogServiceScopeResolver` e configure
+Spring Security e o resolver governado do Config. O SPI recebe o principal do
+Config (tenant, ambiente e ator) e a autenticação do Spring para consultar a
+delegação de serviços mantida pelo host. A consulta HTTP dispensa parâmetros.
+
+O leitor precisa da autoridade `praxis.authz.discovery.required-catalog-authority`
+e, no modo corporativo do Config, de `RULE_DEFINITION_READER`. A resposta
+`services[]` contém o `serviceKey`, o `catalogDigest` e os `decisionPoints[]`
+admitidos por `querySemanticCatalog`. Cada ponto identifica o recurso, a chave,
+o digest do descritor e a referência ao contrato de fatos. Em `factsByMode`,
+`SEARCH` lista os fatos disponíveis em `ADMISSION` para a condição ACCESS e
+`TARGET` lista os disponíveis em `TARGET`. Cada fato descreve caminho, tipo,
+cardinalidade e modelo de presença. A publicação continua responsável pela
+verificação de providers, aprovações, corpus e compatibilidade.
+
+Ausência de sessão retorna 401, falta de autoridade ou delegação retorna 403 e
+divergência entre o ponto admitido e o registro de execução retorna 503. Com o
+opt-in desligado ou sem o bean de delegação, a auto-configuração omite a rota.
+
+## Publicação de políticas ACCESS com confirmação do OPA
+
+O Studio usa o catálogo PAP para revisar o alvo e o Config para persistir a
+definição AUTHORIZATION e sua aprovação independente. A migração Config V79
+registra a aprovação exata, os bundles verificados e os heads observados.
+
+O host habilita `praxis.authz.access-release.enabled=true` e
+`praxis.authz.admin-endpoints.enabled=true`. Declare o escopo Config com
+`praxis.authz.access-release.tenant-id` e `.environment`, e o ambiente do
+bundle inicial com `.opa-environment-key`. Use o transporte HTTP nativo e fixe
+`praxis.authz.opa.instance-id` na instância que consome o bundle do host.
+Forneça o segredo dedicado de distribuição em `.bundle-token` via configuração
+privada. A instância precisa informar essa mesma identidade no runtime head.
+
+O host fornece `PapCatalogServiceScopeResolver` e um
+`AccessPolicyVerificationCorpus` independente para o hash aprovado. A
+publicação e a primeira ativação validam os pontos EXACT/TARGET no PAP e no
+registro do runtime, os fatos por ponto e o vínculo explícito com
+`subject.tenantId`. Cada alvo precisa de permissões e decisões que impedem o acesso em
+ambas as revisões e de uma decisão que muda com a candidata. O recorte aceita
+contribuições ACCESS e rejeita identificadores já presentes na composição.
+
+A sessão do operador precisa do papel `POLICY_ADMIN_PUBLISH`
+(`ROLE_POLICY_ADMIN_PUBLISH` no prefixo padrão do Spring) e da autoridade de
+catálogo para publicar e iniciar a ativação. A UI também usa
+`RULE_DEFINITION_READER` para consultar as definições aprovadas. O Config
+resolve ator, tenant, ambiente e delegação no servidor.
+
+| Método e caminho relativo a `/api/praxis/config/domain-rules/authorization/releases` | Efeito |
+| --- | --- |
+| `POST` no caminho base com `{"definitionId":"<uuid>"}` | Verifica o corpus e grava o release `published` com os artefatos de ativação e restauração. |
+| `POST /{releaseId}/activate` | Seleciona o artefato de ativação e consulta o head da instância configurada. |
+| `POST /{releaseId}/rollback` | Seleciona uma nova revisão com a composição anterior completa. O release selecionado pode estar `active` ou `activating`. |
+| `GET /{releaseId}` | Retorna o estado persistido, a seleção atual e o último head confirmado para a fase exibida. |
+
+A instalação habilita apenas `GET /api/praxis/authz/opa/bundle` na sua rota
+interna de máquina, com TLS e bearer dedicado. O controller verifica o bearer
+antes de retornar o bundle apontado pelo Config. Configure o serviço de
+bundles do OPA para buscar essa URL. A publicação inicial deixa a revisão
+vigente selecionada. Ativação e reversão podem retornar HTTP 202 enquanto o
+OPA faz polling. Retome a mesma transição pelo ID. O Config registra
+`active` ou `reverted` após comparar integralmente o head retornado por
+`/v1/data/praxis/authz/v1/runtime_head` com o esperado. `current` reflete o
+ponteiro de distribuição. `observedHead` registra a última observação para a
+transição e sua igualdade com a revisão preparada.
 
 ## Mapeamento Semântico de Erros HTTP (`PraxisAuthzExceptionHandler`)
 

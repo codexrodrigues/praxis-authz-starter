@@ -182,6 +182,7 @@ public class PraxisAuthzAutoConfiguration {
 
     @Bean
     @ConditionalOnBean(AuthzHostPolicyBootstrapBundle.class)
+    @ConditionalOnProperty(prefix = "praxis.authz.opa", name = "http-transport-enabled", havingValue = "false", matchIfMissing = true)
     @ConditionalOnMissingBean(OpaClientTransport.class)
     public OpaClientTransport bootstrapBundleLocalOpaTransport(
             AuthzHostPolicyBootstrapBundle bundle
@@ -192,7 +193,7 @@ public class PraxisAuthzAutoConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "praxis.authz.opa", name = "http-transport-enabled", havingValue = "true")
     @ConditionalOnMissingBean(OpaClientTransport.class)
-    public OpaClientTransport httpClientOpaTransport(PraxisAuthzProperties properties) {
+    public HttpClientOpaTransport httpClientOpaTransport(PraxisAuthzProperties properties) {
         String instanceId = properties.getOpa().getInstanceId();
         URI baseUri = URI.create(properties.getOpa().getBaseUrl());
         return new HttpClientOpaTransport(

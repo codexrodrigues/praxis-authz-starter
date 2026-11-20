@@ -3575,9 +3575,10 @@ public final class AuthzResourceGovernanceSpec<E> {
             }
             if (this.queryProjection == null && !this.declarativeQueryableFields.isEmpty()) {
                 String qpId = "qp-" + resourceKey.replace('.', '-');
+                List<String> queryablePaths = this.declarativeQueryableFields.keySet().stream().sorted().toList();
                 String qpDigest = CanonicalDigestCalculator.computeDigest(
                         DigestDomainKind.DEPENDENCY_MANIFEST_DIGEST,
-                        qpId + "|" + this.declarativeQueryableFields.keySet() + "|v1"
+                        qpId + "|" + queryablePaths + "|v1"
                 );
                 this.queryProjection = new QueryableResourceProjection(
                         QueryableResourceProjection.SCHEMA_VERSION_V1,
@@ -3883,9 +3884,10 @@ public final class AuthzResourceGovernanceSpec<E> {
                     }
                 }
                 String fcId = "fc-" + resourceKey.replace('.', '-');
+                List<String> factPaths = facts.keySet().stream().sorted().toList();
                 String fcDigest = CanonicalDigestCalculator.computeDigest(
                         DigestDomainKind.DEPENDENCY_MANIFEST_DIGEST,
-                        fcId + "|" + facts.keySet() + "|v1"
+                        fcId + "|" + factPaths + "|v1"
                 );
                 this.factContract = new FactContract(
                         FactContract.SCHEMA_VERSION_V1,

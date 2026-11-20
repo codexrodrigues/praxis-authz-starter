@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.praxisplatform.authz.catalog.FieldLineageCatalogEntry;
 import org.praxisplatform.authz.catalog.SemanticDecisionPointCatalogService;
 import org.praxisplatform.authz.contracts.annotation.AuthzActionRule;
@@ -34,7 +35,6 @@ import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor;
 import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
 import org.praxisplatform.authz.contracts.policy.DualScopeDelegationSpec;
 import org.praxisplatform.authz.host.metadata.MetadataDtoGovernanceIntrospector.IntrospectedDtoGovernanceContract;
-import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.AuthorizedQueryScopeContext;
 import org.praxisplatform.authz.seams.MetadataResourceAuthorizationSeam.TargetReadProjectionEvaluation;
 import org.praxisplatform.authz.seams.RuntimeDecisionPointRegistry;
 import org.praxisplatform.uischema.annotation.ApiResource;
@@ -385,7 +385,6 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public <E> ResourceFilterAccessScope<E> customizeFilterAccessScope(
             BaseResourceQueryService<?, ?, ?> service,
             ResourceFilterAccessScope<E> baseScope
@@ -397,13 +396,23 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         if (meta == null) {
             return baseScope;
         }
+        ResourceFilterAccessScope<E> authzScope =
+                authorizeQueryScope(service, meta, callerContextProvider.currentCallerContext());
+        return combineAccessScopes(baseScope, authzScope);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <E> ResourceFilterAccessScope<E> authorizeQueryScope(
+            BaseResourceQueryService<?, ?, ?> service,
+            ResolvedGovernanceMetadata meta,
+            AuthzCallerContext callerCtx
+    ) {
         AuthzResourceGovernanceSpec<E> spec = (AuthzResourceGovernanceSpec<E>) meta.spec();
-        AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
         Map<String, Object> subjectFacts = callerCtx.subjectAndEnvironmentFacts();
         Map<String, FactResolutionStatus> statuses = resolveFactStatuses(callerCtx, subjectFacts);
 
         ensureTransactionCleanupRegistered(service);
-        ResourceFilterAccessScope<E> authzScope = serviceSupport.authorizeAndResolveAccessScope(
+        return serviceSupport.authorizeAndResolveAccessScope(
                 spec.decisionPoint(),
                 spec.factContractDigest(),
                 callerCtx.incomingHeaderNames(),
@@ -420,7 +429,6 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
                 spec.buildHardScope(callerCtx),
                 service
         );
-        return combineAccessScopes(baseScope, authzScope);
     }
 
     @Override
@@ -441,8 +449,7 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         AuthzResourceGovernanceSpec<E> spec = (AuthzResourceGovernanceSpec<E>) meta.spec();
         AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
 
-        AuthorizedQueryScopeContext activeQueryCtx = ensureActiveQueryContext(service, meta, callerCtx);
-        DataScopePlan activePlan = activeQueryCtx != null ? activeQueryCtx.dataScopePlan() : null;
+        DataScopePlan activePlan = resolveEntityDataScopePlan(service, meta, callerCtx);
         spec.verifyEntityAccessAllowed(unwrapped, callerCtx, activePlan);
 
         if (mode == AccessMode.READ || mode == AccessMode.EXPORT) {
@@ -478,8 +485,7 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         }
         AuthzResourceGovernanceSpec<E> spec = (AuthzResourceGovernanceSpec<E>) meta.spec();
         AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-        AuthorizedQueryScopeContext activeQueryCtx = ensureActiveQueryContext(service, meta, callerCtx);
-        DataScopePlan activePlan = activeQueryCtx != null ? activeQueryCtx.dataScopePlan() : null;
+        DataScopePlan activePlan = resolveEntityDataScopePlan(service, meta, callerCtx);
         boolean checkTargetPerEntity = (mode == AccessMode.READ || mode == AccessMode.EXPORT)
                 && requiresRecordContextualTargetMasking(spec);
         for (E entity : entities) {
@@ -512,24 +518,19 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         E unwrapped = AuthzEntityUnproxySupport.unproxy(entity);
         AuthzResourceGovernanceSpec<E> spec = (AuthzResourceGovernanceSpec<E>) meta.spec();
         AuthzCallerContext callerCtx = callerContextProvider.currentCallerContext();
-        if (!serviceSupport.hasActiveMutationContext() && serviceSupport.currentQueryScopeContext() == null) {
-            ensureActiveQueryContext(service, meta, callerCtx);
-        }
-
         Class<R> dtoClass = (Class<R>) dto.getClass();
-        Function<E, TargetReadProjectionEvaluation> contextualTargetEval = null;
-        if (unwrapped != null && (requiresRecordContextualTargetMasking(spec)
-                || isCustomSurfaceOperation(spec, surfaceOrOperation))) {
-            contextualTargetEval = rawEntity -> evaluateTargetReadProjectionForOperation(
-                    spec, AuthzEntityUnproxySupport.unproxy(rawEntity), callerCtx, surfaceOrOperation);
+        Function<E, TargetReadProjectionEvaluation> contextualTargetEval =
+                unwrapped != null && (requiresRecordContextualTargetMasking(spec)
+                        || isCustomSurfaceOperation(spec, surfaceOrOperation))
+                        ? rawEntity -> evaluateTargetReadProjectionForOperation(
+                                spec, AuthzEntityUnproxySupport.unproxy(rawEntity), callerCtx, surfaceOrOperation)
+                        : null;
+        Supplier<R> maskResponse = () -> serviceSupport.maskMapperResponseIfReady(
+                unwrapped, dto, dtoClass, meta.responseContract().fieldSchemas(), contextualTargetEval);
+        if (serviceSupport.ownsCurrentMutationFrame(service)) {
+            return maskResponse.get();
         }
-        return serviceSupport.maskMapperResponseIfReady(
-                unwrapped,
-                dto,
-                dtoClass,
-                meta.responseContract().fieldSchemas(),
-                contextualTargetEval
-        );
+        return serviceSupport.withQueryFrame(service, () -> authorizeQueryScope(service, meta, callerCtx), maskResponse);
     }
 
     @Override
@@ -736,37 +737,16 @@ public class AuthzResourceGovernanceInterceptor implements ResourceGovernanceInt
         }
     }
 
-    private AuthorizedQueryScopeContext ensureActiveQueryContext(
+    private DataScopePlan resolveEntityDataScopePlan(
             BaseResourceQueryService<?, ?, ?> service,
             ResolvedGovernanceMetadata meta,
             AuthzCallerContext callerCtx
     ) {
-        AuthorizedQueryScopeContext current = serviceSupport.currentQueryScopeContext();
-        if (current != null) {
-            return current;
-        }
-        ensureTransactionCleanupRegistered(service);
-        @SuppressWarnings("unchecked")
-        AuthzResourceGovernanceSpec<Object> spec = (AuthzResourceGovernanceSpec<Object>) meta.spec();
-        Map<String, Object> subjectFacts = callerCtx.subjectAndEnvironmentFacts();
-        serviceSupport.authorizeAndResolveAccessScope(
-                spec.decisionPoint(),
-                spec.factContractDigest(),
-                callerCtx.incomingHeaderNames(),
-                callerCtx.incomingHeaders(),
-                callerCtx.tenantId(),
-                subjectFacts,
-                resolveFactStatuses(callerCtx, subjectFacts),
-                callerCtx.requestedQueryFieldUses(),
-                meta.responseContract().baselineFieldUseDirectives(),
-                spec.jpaDataScopeAdapter(),
-                spec.buildHardScopeJpql(callerCtx),
-                spec.buildHardScopeParams(callerCtx),
-                spec.criteriaTranslator(),
-                spec.buildHardScope(callerCtx),
-                service
+        return serviceSupport.withQueryFrame(
+                service,
+                () -> authorizeQueryScope(service, meta, callerCtx),
+                () -> serviceSupport.currentQueryScopeContext().dataScopePlan()
         );
-        return serviceSupport.currentQueryScopeContext();
     }
 
     private <E> TargetReadProjectionEvaluation evaluateTargetReadProjection(

@@ -16,6 +16,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.praxisplatform.authz.contracts.annotation.AuthzTenantScopeMode;
 import org.praxisplatform.authz.contracts.context.FactDescriptor;
 import org.praxisplatform.authz.contracts.context.FactValueType;
 import org.praxisplatform.authz.contracts.datascope.ComparisonPredicateIr;
@@ -27,6 +30,11 @@ import org.praxisplatform.authz.contracts.datascope.SearchPredicateOperator;
 import org.praxisplatform.authz.contracts.decisionpoint.DecisionPointDescriptor;
 import org.praxisplatform.authz.contracts.decisionpoint.EnforcementCapability;
 import org.praxisplatform.authz.contracts.decisionpoint.EvaluationMode;
+import org.praxisplatform.authz.contracts.decisionpoint.FieldUseCategory;
+import org.praxisplatform.authz.contracts.envelope.RuleEffect;
+import org.praxisplatform.authz.contracts.policy.AuthorizationPolicyRule;
+import org.praxisplatform.authz.contracts.policy.FieldUseContributionSpec;
+import org.praxisplatform.authz.contracts.policy.PolicyFieldSelector;
 import org.praxisplatform.uischema.action.ActionScope;
 import org.praxisplatform.uischema.annotation.ApiResource;
 import org.praxisplatform.uischema.annotation.DomainGovernance;
@@ -42,6 +50,84 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 
 class AuthzAutoIntrospectedSpecTest {
+
+    @Test
+    void derivedFactAndProjectionDigestsUseCanonicalPathOrder() {
+        var forward = resourceWithQueryableFields("alpha", "omega");
+        var reverse = resourceWithQueryableFields("omega", "alpha");
+        var changed = resourceWithQueryableFields("alpha", "zulu");
+
+        assertThat(reverse.factContract()).isEqualTo(forward.factContract());
+        assertThat(reverse.queryProjection()).isEqualTo(forward.queryProjection());
+        assertThat(changed.factContractDigest()).isNotEqualTo(forward.factContractDigest());
+        assertThat(changed.queryProjection().projectionDigest()).isNotEqualTo(forward.queryProjection().projectionDigest());
+    }
+
+    private static AuthzResourceGovernanceSpec<Object> resourceWithQueryableFields(String... fields) {
+        var builder = AuthzResourceGovernanceSpec.builder("catalog.shared-records")
+                .serviceKey("shared-catalog-host");
+        for (String field : fields) {
+            builder.scalarFieldBinding("resource." + field, "attribute." + field, field);
+        }
+        return builder.build();
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "'', resource.middle",
+            "resource.zulu, resource.zulu"
+    })
+    void sharedBootstrapUsesCanonicalPathsAndKeepsExplicitBulkScope(
+            String configuredFactPath,
+            String expectedBulkFactPath
+    ) {
+        String serviceKey = "shared-catalog-host";
+        String actionKey = "approve-batch";
+        Set<SearchPredicateOperator> bulkOperators = Set.of(
+                SearchPredicateOperator.EQ, SearchPredicateOperator.IS_NOT_NULL
+        );
+        var spec = AuthzResourceGovernanceSpec.builder("catalog.shared-records")
+                .serviceKey(serviceKey)
+                .tenantScope(new AuthzResourceGovernanceSpec.TenantScopeSpec(
+                        AuthzTenantScopeMode.AUTHENTICATED_SHARED, "", "",
+                        "subject.principalId", "", "", false, configuredFactPath
+                ))
+                .scalarFieldBinding("resource.zulu", "attribute.a", "e.zulu",
+                        FactValueType.STRING, bulkOperators, false)
+                .scalarFieldBinding("resource.middle", "attribute.b", "e.middle",
+                        FactValueType.STRING, bulkOperators, false)
+                .scalarFieldBinding("resource.first", "attribute.c", "e.first",
+                        FactValueType.STRING, Set.of(SearchPredicateOperator.EQ), false)
+                .resourceSensitiveFact("resource.earliest", "attribute.d", FactValueType.STRING, null, null)
+                .bulkWorkflowAction(actionKey, Set.of())
+                .build();
+        Map<String, Object> principalPresent = Map.of("!=", List.of(Map.of("var", "subject.principalId"), ""));
+        var manual = AuthzHostPolicyBootstrapBuilder.forService(serviceKey)
+                .addResourceSpec(spec, null, null, null)
+                .addAuthenticatedSharedPolicy(spec, "shared-search", List.of())
+                .addSharedBulkActionPolicy(spec, actionKey, "shared-approve", principalPresent, Set.of())
+                .build();
+        var annotated = AuthzHostPolicyBootstrapBuilder.forService(serviceKey)
+                .addAnnotatedResource(spec, null, null, null)
+                .build();
+
+        var expectedGrant = new FieldUseContributionSpec(
+                PolicyFieldSelector.exact(Set.of("attribute.c")), Set.of(FieldUseCategory.VALUE), RuleEffect.ALLOW
+        );
+        Map<String, Object> expectedBulkScope = Map.of("is_not_null", List.of(Map.of("var", expectedBulkFactPath)));
+        for (var bundle : List.of(manual, annotated)) {
+            List<AuthorizationPolicyRule> searchRules = bundle.policies().stream()
+                    .flatMap(policy -> policy.rules().stream())
+                    .filter(rule -> rule.evaluationModes().contains(EvaluationMode.SEARCH))
+                    .toList();
+            assertThat(searchRules).hasSize(2);
+            assertThat(searchRules).anySatisfy(rule ->
+                    assertThat(rule.contributions().fieldUse()).containsExactly(expectedGrant));
+            assertThat(searchRules).filteredOn(rule -> rule.contributions().dataScope() != null).singleElement()
+                    .satisfies(rule -> assertThat(rule.contributions().dataScope().resourceCondition().expression())
+                            .isEqualTo(expectedBulkScope));
+        }
+    }
 
     static class SampleSetor {
         @Id

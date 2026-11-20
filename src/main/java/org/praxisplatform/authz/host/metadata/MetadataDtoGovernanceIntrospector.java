@@ -511,7 +511,7 @@ public final class MetadataDtoGovernanceIntrospector {
                     || "restricted".equals(effectiveClassification)
                     || "confidential".equals(effectiveClassification))) {
                 MaskContributionSpec derivedMask = deriveDefaultMaskForGovernance(
-                        attributeId, javaType, valueType, nullable);
+                        attributeId, javaType, nullable);
                 if (derivedMask != null) {
                     derivedMasks.add(derivedMask);
                 } else {
@@ -858,17 +858,17 @@ public final class MetadataDtoGovernanceIntrospector {
     private static MaskContributionSpec deriveDefaultMaskForGovernance(
             String attributeId,
             Class<?> javaType,
-            FactValueType valueType,
             boolean nullable
     ) {
-        if (valueType == FactValueType.STRING) {
+        // Complex DTO fields can share the STRING fact-type fallback without accepting string values.
+        if (javaType == String.class) {
             return new MaskContributionSpec(
                     PolicyFieldSelector.exact(Set.of(attributeId)),
                     "REDACT_CONSTANT",
                     Map.of("replacement", "***")
             );
         }
-        if ((javaType == null || !javaType.isPrimitive()) && nullable) {
+        if (nullable) {
             return new MaskContributionSpec(
                     PolicyFieldSelector.exact(Set.of(attributeId)),
                     "NULLIFY",
